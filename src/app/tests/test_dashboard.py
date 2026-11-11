@@ -10,13 +10,11 @@ from django.utils import formats, timezone
 
 from app.dashboard import (
     ROW_LIMIT,
-    _caught_up_row,
+    _continue_row,
     _list_row,
     _planning_row,
     build_rows,
     complete_finished_shows,
-    needs_release_dates,
-    page,
     refresh_for_user,
 )
 from app.models import (
@@ -209,73 +207,32 @@ class DashboardRowTests(TestCase):
 
         self.assertEqual(titles, ["Plan"])
 
-    def test_caught_up_requires_every_aired_episode_and_sorts_by_last_watch(self):
-        """A show is caught up only when no aired episode is still unwatched."""
+    def test_continue_watching_lists_half_watched_shows_by_last_watch(self):
+        """Include a half-watched show, drop a finished one, and sort by last watch."""
         now = timezone.now()
-        self._show_with_episode("301", "Current", now - timedelta(days=1))
-        self._show_with_episode("302", "Older", now - timedelta(days=5))
-        behind = self._tv("303", "Behind", Status.IN_PROGRESS.value)
-        season = self._season(behind, 1)
-        self._air(season, 1, now - timedelta(days=2))
+        recent = self._half_watched("301", "Recent", now - timedelta(days=1))
+        self._half_watched("302", "Older", now - timedelta(days=8))
+        self._show_with_episode("303", "Finished", now)
         waiting = self._tv("304", "Waiting", Status.IN_PROGRESS.value)
         future = self._season(waiting, 1)
         self._air(future, 1, now + timedelta(days=3))
-        finished = self._show_with_episode("305", "Finished", now)
-        TV.objects.filter(pk=finished.pk).update(status=Status.COMPLETED.value)
-        specials = self._show_with_episode("306", "Specials", now - timedelta(days=2))
-        special = self._season(specials, 0)
-        self._air(special, 1, now - timedelta(days=2))
 
-        titles = self._titles(_caught_up_row(self.user))
+        row = _continue_row(self.user)
 
-        self.assertEqual(titles, ["Current", "Specials", "Older"])
-        self.assertNotIn("Behind", titles)
-        self.assertNotIn("Waiting", titles)
-        self.assertNotIn("Finished", titles)
-
-    def test_caught_up_keeps_a_recent_watch_or_air_date(self):
-        """Keep a show with a recent watch or air date, and drop an older one."""
-        now = timezone.now()
-        self._show_with_episode("360", "Watched", now - timedelta(days=2))
-        aired = self._tv("361", "Aired", Status.IN_PROGRESS.value)
-        season = self._season(aired, 1)
-        self._air(season, 1, now - timedelta(days=4))
-        self._watch(season, 1, now - timedelta(days=90))
-        stale = self._show_with_episode("362", "Stale", now - timedelta(days=90))
-        special = self._season(stale, 0)
-        self._air(special, 1, now - timedelta(days=1))
-        self._watch(special, 1, now)
-
-        row = _caught_up_row(self.user)
-
-        self.assertEqual(self._titles(row), ["Watched", "Aired"])
+        self.assertEqual(self._titles(row), ["Recent", "Older"])
+        self.assertEqual(row["media"][0].next_episode, "S1E2")
+        self.assertEqual(row["media"][0].episodes_remaining, 2)
         self.assertIn("status=In+progress", row["see_all"])
         self.assertNotIn("sort=", row["see_all"])
-        stale.refresh_from_db()
-        self.assertEqual(stale.status, Status.IN_PROGRESS.value)
-        context = page(self.user)
-        self.assertFalse(context["caught_up_quiet"])
-        self.assertFalse(context["release_dates_pending"])
+        recent.refresh_from_db()
+        self.assertEqual(recent.status, Status.IN_PROGRESS.value)
 
-    def test_old_caught_up_show_is_hidden_and_stays_in_progress(self):
-        """A show outside the window leaves the row without changing status."""
-        watched = timezone.now() - timedelta(days=90)
-        show = self._show_with_episode("363", "Archive", watched)
-
-        self.assertNotIn("Caught up", [row["title"] for row in build_rows(self.user)])
-        show.refresh_from_db()
-        self.assertEqual(show.status, Status.IN_PROGRESS.value)
-        context = page(self.user)
-        self.assertTrue(context["caught_up_quiet"])
-        self.assertFalse(context["release_dates_pending"])
-        self.assertEqual(context["caught_up_days"], 60)
-
-    def test_caught_up_cards_include_the_public_score(self):
-        """Each caught-up card carries the annotated public score."""
-        show = self._show_with_episode("311", "Scored", timezone.now())
+    def test_continue_cards_include_the_public_score(self):
+        """Each continue card carries the annotated public score."""
+        show = self._half_watched("311", "Scored", timezone.now())
         self._score(show.item, 80, votes=2000)
 
-        row = _caught_up_row(self.user)
+        row = _continue_row(self.user)
 
         self.assertEqual(len(row["media"]), 1)
         self.assertEqual(row["media"][0].public_rating, Decimal("80.0"))
@@ -294,8 +251,8 @@ class DashboardRowTests(TestCase):
                 show.refresh_from_db()
                 self.assertEqual(show.status, Status.COMPLETED.value)
 
-    def test_still_airing_show_stays_in_progress_and_in_caught_up(self):
-        """A show that is still airing stays In progress and remains caught up."""
+    def test_still_airing_show_stays_in_progress(self):
+        """A fully watched show stays In progress and leaves Continue watching."""
         show = self._show_with_episode("340", "Airing", timezone.now())
 
         with self._tmdb_status("Returning Series"):
@@ -303,7 +260,7 @@ class DashboardRowTests(TestCase):
 
         show.refresh_from_db()
         self.assertEqual(show.status, Status.IN_PROGRESS.value)
-        self.assertEqual(self._titles(_caught_up_row(self.user)), ["Airing"])
+        self.assertEqual(_continue_row(self.user)["media"], [])
 
     def test_ended_show_with_an_unwatched_episode_stays_in_progress(self):
         """One aired episode left unwatched keeps the show In progress."""
@@ -383,25 +340,23 @@ class DashboardRowTests(TestCase):
             return_value={**METADATA, "details": {"status": status}},
         )
 
-    def test_in_progress_tv_without_events_needs_release_dates(self):
-        """No season events means Caught up stays hidden and the hint applies."""
+    def test_show_without_an_aired_episode_is_not_listed(self):
+        """In-progress TV with nothing aired yet stays off Continue watching."""
         show = self._tv("320", "No Dates", Status.IN_PROGRESS.value)
 
-        self.assertTrue(needs_release_dates(self.user))
-        self.assertNotIn("Caught up", [row["title"] for row in build_rows(self.user)])
+        self.assertEqual(_continue_row(self.user)["media"], [])
 
         season = self._season(show, 1)
         self._air(season, 1, timezone.now() - timedelta(days=1))
-        self._watch(season, 1, timezone.now())
 
-        self.assertFalse(needs_release_dates(self.user))
+        self.assertEqual(self._titles(_continue_row(self.user)), ["No Dates"])
 
-    def test_caught_up_loads_episodes_without_a_query_per_show(self):
-        """Caught up is the show query plus the season and episode prefetches."""
-        self._show_with_episode("310", "Ready", timezone.now())
+    def test_continue_loads_episodes_without_a_query_per_show(self):
+        """Continue watching is one show query plus the prefetches."""
+        self._half_watched("310", "Ready", timezone.now())
 
-        with self.assertNumQueries(3):
-            _caught_up_row(self.user)
+        with self.assertNumQueries(4):
+            _continue_row(self.user)
 
     def test_empty_rows_are_left_out(self):
         """A row with nothing in it is not returned."""
@@ -410,7 +365,11 @@ class DashboardRowTests(TestCase):
 
         rows = build_rows(self.user)
 
-        self.assertEqual([row["title"] for row in rows], ["Top Planning movies"])
+        self.assertEqual(
+            [row["title"] for row in rows],
+            ["Top Planning movies", "Continue watching"],
+        )
+        self.assertEqual(rows[-1]["media"], [])
 
     def _titles(self, row):
         return [entry.item.title for entry in row["media"]]
@@ -489,6 +448,13 @@ class DashboardRowTests(TestCase):
         self._watch(season, 1, watched_at)
         return tv
 
+    def _half_watched(self, media_id, title, watched_at):
+        tv = self._show_with_episode(media_id, title, watched_at)
+        season = tv.seasons.get(item__season_number=1)
+        self._air(season, 2, watched_at)
+        self._air(season, 3, watched_at)
+        return tv
+
 
 class DashboardViewTests(TestCase):
     """The dashboard page, its links, and the login redirect."""
@@ -525,41 +491,16 @@ class DashboardViewTests(TestCase):
         self.assertContains(response, "status=Planning")
         self.assertContains(response, "sort=public_rating")
         self.assertNotContains(response, "Top Downloaded movies")
+        self.assertContains(response, "Continue watching")
+        self.assertContains(response, "No shows in progress.")
+        self.assertContains(response, "status=In+progress")
         self.assertNotContains(response, "Caught up")
         self.assertContains(response, "dashboard-row")
         self.assertContains(response, 'href="/dashboard"')
         self.assertContains(response, "Refresh")
-        self.assertNotContains(response, "release dates load")
 
-    def test_page_hints_when_in_progress_tv_has_no_release_dates(self):
-        """The hint shows for in-progress TV that has no season events yet."""
-        with (
-            patch("app.providers.services.get_media_metadata", return_value=METADATA),
-            patch("app.models.Item.fetch_releases"),
-        ):
-            item = Item.objects.create(
-                media_id="9",
-                source=Sources.TMDB.value,
-                media_type=MediaTypes.TV.value,
-                title="Waiting",
-                image="http://example.com/a.jpg",
-            )
-            TV.objects.create(
-                item=item,
-                user=self.user,
-                status=Status.IN_PROGRESS.value,
-            )
-
-        response = self.client.get(reverse("dashboard"))
-
-        self.assertContains(
-            response,
-            "last 60 days appear here after release dates load",
-        )
-        self.assertNotContains(response, ">Caught up<")
-
-    def test_old_caught_up_show_explains_the_window(self):
-        """An older caught-up show stays off the row and the page says why."""
+    def test_fully_watched_show_leaves_continue_watching_empty(self):
+        """A show with every aired episode watched is not listed."""
         with (
             patch("app.providers.services.get_media_metadata", return_value=METADATA),
             patch("app.models.Item.fetch_releases"),
@@ -612,10 +553,9 @@ class DashboardViewTests(TestCase):
 
         response = self.client.get(reverse("dashboard"))
 
-        self.assertContains(response, "No shows caught up in the last 60 days")
-        self.assertContains(response, "Older shows stay In progress")
-        self.assertNotContains(response, ">Caught up<")
-        self.assertNotContains(response, "release dates load")
+        self.assertContains(response, "No shows in progress.")
+        self.assertNotContains(response, "Archive")
+        self.assertNotContains(response, "Caught up")
 
     def test_dashboard_card_uses_a_short_date_beside_the_score(self):
         """The date badge is short enough to share the card with the score star."""
@@ -668,9 +608,16 @@ class DashboardViewTests(TestCase):
             Episode.objects.bulk_create(
                 [Episode(item=episode_item, related_season=season, end_date=watched)],
             )
+            Event.objects.create(
+                item=season_item,
+                content_number=2,
+                datetime=watched,
+            )
 
         response = self.client.get(reverse("dashboard"))
 
+        self.assertContains(response, "S1E2")
+        self.assertContains(response, "1 left")
         self.assertContains(response, compact_date(watched))
         self.assertNotContains(
             response,

@@ -37,7 +37,7 @@
       {% endif %}
     {% endwith %}
 
-    {% if media.progress and media_type != MediaTypes.MOVIE.value %}
+    {% if media.progress and not media.next_episode and media_type != MediaTypes.MOVIE.value %}
       <div class="absolute bottom-2 left-2 bg-gray-900/90 text-white text-xs px-2 py-1 rounded-md flex items-center shadow-md">
         <span class="text-sm text-white">
           {{ media.formatted_progress }}
@@ -114,6 +114,10 @@
        title="{{ title }}">{{ title }}</a>
     {% if item.release_year %}
       <div class="text-xs text-gray-400 mt-1">{{ item.release_year }}</div>
+    {% endif %}
+    {% if media.next_episode %}
+      <div class="mt-1 text-xs text-gray-300">{{ media.next_episode }}</div>
+      <div class="text-xs text-gray-400">{{ media.episodes_remaining }} {% trans "left" %}</div>
     {% endif %}
   </div>
 

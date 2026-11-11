@@ -402,8 +402,6 @@ PUBLIC_SCORE_MIN_TMDB_VOTES = config(
     default=50,
     cast=int,
 )
-DASHBOARD_CAUGHT_UP_DAYS = config("DASHBOARD_CAUGHT_UP_DAYS", default=60, cast=int)
-
 TVDB_API = config(
     "TVDB_API",
     default=secret(

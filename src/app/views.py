@@ -147,7 +147,7 @@ def dashboard_view(request):
     return render(
         request,
         "app/dashboard.html",
-        dashboard.page(request.user),
+        {"rows": dashboard.build_rows(request.user)},
     )
 
 

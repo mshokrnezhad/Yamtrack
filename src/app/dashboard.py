@@ -1,8 +1,6 @@
 import logging
-from datetime import timedelta
 from urllib.parse import urlencode
 
-from django.conf import settings
 from django.core.cache import cache
 from django.db.models import (
     Exists,
@@ -48,23 +46,6 @@ class _ListedMedia:
         self.start_date = None
 
 
-def page(user):
-    """Return the dashboard template context."""
-    rows = build_rows(user)
-    pending = needs_release_dates(user)
-    quiet = (
-        not pending
-        and not any(row.get("key") == "caught_up" for row in rows)
-        and TV.objects.filter(user=user, status=Status.IN_PROGRESS.value).exists()
-    )
-    return {
-        "rows": rows,
-        "release_dates_pending": pending,
-        "caught_up_quiet": quiet,
-        "caught_up_days": settings.DASHBOARD_CAUGHT_UP_DAYS,
-    }
-
-
 def build_rows(user):
     """Return the dashboard rows that have something to show."""
     downloaded = (
@@ -90,9 +71,10 @@ def build_rows(user):
             _("Top Downloaded TV"),
         ),
         _planning_row(user, MediaTypes.TV.value, _("Top Planning TV")),
-        _caught_up_row(user),
     ]
-    return [row for row in rows if row["media"]]
+    rows = [row for row in rows if row["media"]]
+    rows.append(_continue_row(user))
+    return rows
 
 
 def _list_row(user, custom_list, media_type, title):
@@ -218,26 +200,11 @@ def _tmdb_status(show):
     return (metadata.get("details") or {}).get("status") or ""
 
 
-def needs_release_dates(user):
-    """Return whether in-progress TV still has no season events."""
-    shows = TV.objects.filter(user=user, status=Status.IN_PROGRESS.value)
-    season_events = Event.objects.filter(
-        item__media_type=MediaTypes.SEASON.value,
-        item__season_number__gt=0,
-        item__media_id=OuterRef("item__media_id"),
-        item__source=OuterRef("item__source"),
-    )
-    return shows.exists() and not shows.filter(Exists(season_events)).exists()
-
-
-def _caught_up_row(user):
-    """Recent in-progress shows with every aired episode watched."""
-    cutoff = timezone.now() - timedelta(days=settings.DASHBOARD_CAUGHT_UP_DAYS)
+def _continue_row(user):
+    """In-progress shows with an aired episode still to watch, newest watch first."""
     queryset = (
         TV.objects.filter(user=user, status=Status.IN_PROGRESS.value)
-        .filter(Exists(_aired_events()))
-        .exclude(Exists(_unwatched_aired()))
-        .filter(_recent_activity(cutoff))
+        .filter(Exists(_unwatched_aired()))
         .select_related("item")
         .annotate(
             last_watched_at=Max(
@@ -252,10 +219,10 @@ def _caught_up_row(user):
             Lower("item__title"),
         )[:ROW_LIMIT],
     )
-    _prefetch_episodes(shows)
+    _label_continue(shows)
     return {
-        "key": "caught_up",
-        "title": _("Caught up"),
+        "key": "continue",
+        "title": _("Continue watching"),
         "see_all": _media_list_url(
             user,
             MediaTypes.TV.value,
@@ -264,6 +231,34 @@ def _caught_up_row(user):
         "media_type": MediaTypes.TV.value,
         "media": shows,
     }
+
+
+def _label_continue(shows):
+    """Mark each card with its next aired episode and how many remain."""
+    if not shows:
+        return
+    now = timezone.now()
+    prefetch_related_objects(shows, _continue_prefetch(now))
+    for show in shows:
+        pending = []
+        for season in show.seasons.all():
+            number = season.item.season_number
+            if not number:
+                continue
+            watched = {
+                episode.item.episode_number
+                for episode in season.episodes.all()
+                if episode.end_date is not None
+            }
+            for event in season.item.event_set.all():
+                if event.datetime > now or event.content_number in watched:
+                    continue
+                pending.append((number, event.content_number))
+        if not pending:
+            continue
+        pending.sort()
+        show.next_episode = f"S{pending[0][0]}E{pending[0][1]}"
+        show.episodes_remaining = len(pending)
 
 
 def _by_public_score(queryset, title_field, score_field="public_rating"):
@@ -329,14 +324,15 @@ def _media_list_url(user, media_type, query):
     return f"{base}?{urlencode(query)}"
 
 
-def _recent_activity(cutoff):
-    """Match a non-special episode watched or aired on or after the cutoff."""
-    recent_watch = Episode.objects.filter(
-        related_season__related_tv=OuterRef("pk"),
-        related_season__item__season_number__gt=0,
-        end_date__gte=cutoff,
+def _continue_prefetch(now):
+    aired = Event.objects.filter(content_number__isnull=False, datetime__lte=now)
+    return Prefetch(
+        "seasons",
+        queryset=Season.objects.select_related("item").prefetch_related(
+            Prefetch("episodes", queryset=Episode.objects.select_related("item")),
+            Prefetch("item__event_set", queryset=aired),
+        ),
     )
-    return Exists(recent_watch) | Exists(_aired_events().filter(datetime__gte=cutoff))
 
 
 def _aired_events():
