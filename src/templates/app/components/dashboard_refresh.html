@@ -1,0 +1,9 @@
+{% load i18n %}
+{% if task_id %}
+  <span class="text-sm text-gray-400"
+        hx-get="{% url 'dashboard_refresh_status' task_id %}"
+        hx-trigger="load, every 2s"
+        hx-swap="outerHTML">{% trans "Refreshing…" %}</span>
+{% else %}
+  <span class="text-sm text-gray-400">{% trans "Refresh the page in a minute." %}</span>
+{% endif %}

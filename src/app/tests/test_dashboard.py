@@ -3,6 +3,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -13,7 +14,9 @@ from app.dashboard import (
     _list_row,
     _planning_row,
     build_rows,
+    complete_finished_shows,
     needs_release_dates,
+    refresh_for_user,
 )
 from app.models import (
     TV,
@@ -26,6 +29,7 @@ from app.models import (
     Sources,
     Status,
 )
+from app.providers.services import ProviderAPIError
 from events.models import Event
 from lists.models import CustomList
 
@@ -237,6 +241,109 @@ class DashboardRowTests(TestCase):
         self.assertEqual(len(row["media"]), 1)
         self.assertEqual(row["media"][0].public_rating, Decimal("80.0"))
 
+    def test_finished_shows_move_to_completed_when_caught_up(self):
+        """Ended or canceled shows with every aired episode watched are completed."""
+        for tmdb_status in ("Ended", "Canceled"):
+            with self.subTest(tmdb_status=tmdb_status):
+                show = self._show_with_episode(
+                    tmdb_status,
+                    tmdb_status,
+                    timezone.now(),
+                )
+                with self._tmdb_status(tmdb_status):
+                    complete_finished_shows(self.user)
+                show.refresh_from_db()
+                self.assertEqual(show.status, Status.COMPLETED.value)
+
+    def test_still_airing_show_stays_in_progress_and_in_caught_up(self):
+        """A show that is still airing stays In progress and remains caught up."""
+        show = self._show_with_episode("340", "Airing", timezone.now())
+
+        with self._tmdb_status("Returning Series"):
+            complete_finished_shows(self.user)
+
+        show.refresh_from_db()
+        self.assertEqual(show.status, Status.IN_PROGRESS.value)
+        self.assertEqual(self._titles(_caught_up_row(self.user)), ["Airing"])
+
+    def test_ended_show_with_an_unwatched_episode_stays_in_progress(self):
+        """One aired episode left unwatched keeps the show In progress."""
+        show = self._tv("341", "Behind", Status.IN_PROGRESS.value)
+        season = self._season(show, 1)
+        self._air(season, 1, timezone.now() - timedelta(days=1))
+
+        with self._tmdb_status("Ended"):
+            complete_finished_shows(self.user)
+
+        show.refresh_from_db()
+        self.assertEqual(show.status, Status.IN_PROGRESS.value)
+
+    def test_unwatched_special_does_not_block_completion(self):
+        """Season 0 does not keep an otherwise finished show In progress."""
+        show = self._show_with_episode("342", "Specials", timezone.now())
+        special = self._season(show, 0)
+        self._air(special, 1, timezone.now() - timedelta(days=1))
+
+        with self._tmdb_status("Ended"):
+            complete_finished_shows(self.user)
+
+        show.refresh_from_db()
+        self.assertEqual(show.status, Status.COMPLETED.value)
+
+    def test_ended_show_with_no_aired_episodes_stays_in_progress(self):
+        """A show with no aired episodes is not treated as finished."""
+        show = self._tv("343", "Empty", Status.IN_PROGRESS.value)
+
+        with self._tmdb_status("Ended"):
+            complete_finished_shows(self.user)
+
+        show.refresh_from_db()
+        self.assertEqual(show.status, Status.IN_PROGRESS.value)
+
+    def test_missing_tmdb_status_leaves_the_show_in_progress(self):
+        """A failed TMDB lookup does not complete the show."""
+        show = self._show_with_episode("345", "Unknown", timezone.now())
+
+        with patch(
+            "app.providers.services.get_media_metadata",
+            side_effect=ProviderAPIError(Sources.TMDB.value, Exception("down")),
+        ):
+            complete_finished_shows(self.user)
+
+        show.refresh_from_db()
+        self.assertEqual(show.status, Status.IN_PROGRESS.value)
+
+    def test_refresh_reloads_the_calendar_before_the_status_check(self):
+        """Release dates are loaded before a show can move to Completed."""
+        show = self._show_with_episode("344", "Ordered", timezone.now())
+        order = []
+
+        def reload(_user):
+            order.append("reload")
+
+        def metadata(*_args, **_kwargs):
+            order.append("status")
+            return {**METADATA, "details": {"status": "Ended"}}
+
+        with (
+            patch("events.tasks.reload_calendar", side_effect=reload),
+            patch(
+                "app.providers.services.get_media_metadata",
+                side_effect=metadata,
+            ),
+        ):
+            refresh_for_user(self.user)
+
+        self.assertEqual(order, ["reload", "status"])
+        show.refresh_from_db()
+        self.assertEqual(show.status, Status.COMPLETED.value)
+
+    def _tmdb_status(self, status):
+        return patch(
+            "app.providers.services.get_media_metadata",
+            return_value={**METADATA, "details": {"status": status}},
+        )
+
     def test_in_progress_tv_without_events_needs_release_dates(self):
         """No season events means Caught up stays hidden and the hint applies."""
         show = self._tv("320", "No Dates", Status.IN_PROGRESS.value)
@@ -354,6 +461,7 @@ class DashboardViewTests(TestCase):
             password="test-pass",  # noqa: S106
         )
         self.client.login(username="dash-view", password="test-pass")  # noqa: S106
+        cache.delete(f"dashboard_refresh_{self.user.pk}")
         item = Item.objects.create(
             media_id="1",
             source=Sources.TMDB.value,
@@ -381,6 +489,7 @@ class DashboardViewTests(TestCase):
         self.assertNotContains(response, "Caught up")
         self.assertContains(response, "dashboard-row")
         self.assertContains(response, 'href="/dashboard"')
+        self.assertContains(response, "Refresh")
         self.assertNotContains(response, "release dates load")
 
     def test_page_hints_when_in_progress_tv_has_no_release_dates(self):
@@ -409,6 +518,53 @@ class DashboardViewTests(TestCase):
             "Caught up shows up here after release dates load",
         )
         self.assertNotContains(response, ">Caught up<")
+
+    @patch("app.tasks.refresh_dashboard.delay")
+    def test_refresh_queues_the_job_and_says_it_is_refreshing(self, delay):
+        """Refresh queues the user's job and shows that it is running."""
+        delay.return_value.id = "task-1"
+
+        response = self.client.post(reverse("dashboard_refresh"))
+
+        self.assertContains(response, "Refreshing")
+        delay.assert_called_once_with(self.user.pk)
+        self.assertEqual(cache.get(f"dashboard_refresh_{self.user.pk}"), "task-1")
+
+    @patch("app.tasks.refresh_dashboard.delay")
+    def test_refresh_is_limited_to_once_a_minute(self, delay):
+        """A second refresh in the same minute does not queue another job."""
+        delay.return_value.id = "task-1"
+        self.client.post(reverse("dashboard_refresh"))
+        delay.return_value.id = "task-2"
+
+        response = self.client.post(reverse("dashboard_refresh"))
+
+        self.assertContains(response, "Refresh the page in a minute.")
+        delay.assert_called_once_with(self.user.pk)
+
+    @patch("app.views.AsyncResult")
+    def test_refresh_reloads_the_page_when_the_job_finishes(self, result):
+        """A finished job tells the page to reload."""
+        cache.set(f"dashboard_refresh_{self.user.pk}", "task-1", timeout=60)
+        result.return_value.ready.return_value = True
+
+        response = self.client.get(
+            reverse("dashboard_refresh_status", args=["task-1"]),
+        )
+
+        self.assertEqual(response["HX-Refresh"], "true")
+
+    @patch("app.views.AsyncResult")
+    def test_refresh_status_waits_while_the_job_is_running(self, result):
+        """A running job keeps the Refreshing message in place."""
+        cache.set(f"dashboard_refresh_{self.user.pk}", "task-1", timeout=60)
+        result.return_value.ready.return_value = False
+
+        response = self.client.get(
+            reverse("dashboard_refresh_status", args=["task-1"]),
+        )
+
+        self.assertEqual(response.status_code, 204)
 
     def test_anonymous_visitors_are_sent_to_login(self):
         """The dashboard is the private landing page."""

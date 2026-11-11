@@ -7,7 +7,19 @@
 
 {% block content %}
   <div class="dashboard-rows space-y-8">
-    <h1 class="text-3xl font-bold">{% trans "Dashboard" %}</h1>
+    <div class="flex items-center justify-between gap-4">
+      <h1 class="text-3xl font-bold">{% trans "Dashboard" %}</h1>
+      <div class="flex items-center gap-3">
+        <button type="button"
+                class="text-sm text-indigo-400 hover:text-indigo-300"
+                hx-post="{% url 'dashboard_refresh' %}"
+                hx-target="#dashboard-refresh"
+                hx-swap="innerHTML"
+                hx-disabled-elt="this"
+                hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>{% trans "Refresh" %}</button>
+        <span id="dashboard-refresh"></span>
+      </div>
+    </div>
 
     {% for row in rows %}
       <section class="min-w-0">

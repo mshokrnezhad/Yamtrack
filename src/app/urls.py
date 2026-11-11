@@ -9,6 +9,12 @@ register_converter(converters.SourceChecker, "source")
 urlpatterns = [
     path("", views.home, name="home"),
     path("dashboard", views.dashboard_view, name="dashboard"),
+    path("dashboard/refresh", views.dashboard_refresh, name="dashboard_refresh"),
+    path(
+        "dashboard/refresh/<str:task_id>",
+        views.dashboard_refresh_status,
+        name="dashboard_refresh_status",
+    ),
     path("<str:username>/<media_type:media_type>", views.media_list, name="medialist"),
     path("search", views.media_search, name="search"),
     path(

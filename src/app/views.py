@@ -3,6 +3,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import requests
+from celery.result import AsyncResult
 from django.apps import apps
 from django.conf import settings
 from django.contrib import messages
@@ -111,6 +112,33 @@ def home(request):
         "items_limit": items_limit,
     }
     return render(request, "app/home.html", context)
+
+
+@require_POST
+def dashboard_refresh(request):
+    """Queue a calendar reload and a status re-check for the current user."""
+    task_id = dashboard.queue_refresh(request.user)
+    return render(
+        request,
+        "app/components/dashboard_refresh.html",
+        {"task_id": task_id},
+    )
+
+
+@require_GET
+def dashboard_refresh_status(request, task_id):
+    """Reload the dashboard once the refresh job has finished."""
+    if not dashboard.refresh_is_current(request.user, task_id):
+        return render(
+            request,
+            "app/components/dashboard_refresh.html",
+            {"task_id": None},
+        )
+    if AsyncResult(task_id).ready():
+        response = HttpResponse()
+        response["HX-Refresh"] = "true"
+        return response
+    return HttpResponse(status=204)
 
 
 @require_GET

@@ -38,6 +38,19 @@ def refresh_public_ratings():
     return updated
 
 
+@shared_task(name="Refresh dashboard")
+def refresh_dashboard(user_id):
+    """Reload one user's calendar, then complete finished shows."""
+    from django.contrib.auth import get_user_model  # noqa: PLC0415
+
+    from app.dashboard import refresh_for_user  # noqa: PLC0415
+
+    user = get_user_model().objects.filter(pk=user_id).first()
+    if user is None:
+        return 0
+    return refresh_for_user(user)
+
+
 @shared_task(name="Refresh item public rating")
 def refresh_item_public_rating(item_id):
     """Refresh one item without blocking the page that queued it."""

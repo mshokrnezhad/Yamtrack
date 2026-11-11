@@ -1,5 +1,7 @@
+import logging
 from urllib.parse import urlencode
 
+from django.core.cache import cache
 from django.db.models import (
     Exists,
     F,
@@ -14,14 +16,20 @@ from django.db.models.functions import Lower, RowNumber
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
+from simple_history.utils import bulk_update_with_history
 
-from app.models import TV, Episode, Item, MediaTypes, Movie, Season, Status
+from app.models import TV, Episode, Item, MediaTypes, Movie, Season, Sources, Status
+from app.providers import services
 from app.ratings import annotate_public_rating
 from events.models import Event
 from lists.models import CustomList
 
+logger = logging.getLogger(__name__)
+
 ROW_LIMIT = 10
 DOWNLOADED_LIST = "Downloaded"
+REFRESH_COOLDOWN = 60
+FINISHED_TMDB_STATUSES = frozenset({"Ended", "Canceled"})
 
 
 class _ListedMedia:
@@ -129,6 +137,66 @@ def _planning_row(user, media_type, title):
         "media_type": media_type,
         "media": media,
     }
+
+
+def queue_refresh(user):
+    """Queue one calendar reload and status re-check per minute."""
+    from app.tasks import refresh_dashboard  # noqa: PLC0415
+
+    key = f"dashboard_refresh_{user.pk}"
+    if not cache.add(key, "pending", timeout=REFRESH_COOLDOWN):
+        return None
+    task = refresh_dashboard.delay(user.pk)
+    cache.set(key, task.id, timeout=REFRESH_COOLDOWN)
+    return task.id
+
+
+def refresh_is_current(user, task_id):
+    """Return whether this poll belongs to the user's latest refresh."""
+    return cache.get(f"dashboard_refresh_{user.pk}") == task_id
+
+
+def refresh_for_user(user):
+    """Reload this user's calendar, then complete shows that have finished airing."""
+    from events.tasks import reload_calendar  # noqa: PLC0415
+
+    reload_calendar(user)
+    return len(complete_finished_shows(user))
+
+
+def complete_finished_shows(user):
+    """Mark fully watched ended or canceled shows as completed."""
+    shows = (
+        TV.objects.filter(user=user, status=Status.IN_PROGRESS.value)
+        .filter(Exists(_aired_events()))
+        .exclude(Exists(_unwatched_aired()))
+        .select_related("item")
+    )
+    finished = []
+    for show in shows:
+        if _tmdb_status(show) not in FINISHED_TMDB_STATUSES:
+            continue
+        show.status = Status.COMPLETED.value
+        finished.append(show)
+    if finished:
+        bulk_update_with_history(finished, TV, ["status"], default_user=user)
+    return finished
+
+
+def _tmdb_status(show):
+    """Return the cached TMDB show status, or nothing when it cannot be read."""
+    if show.item.source != Sources.TMDB.value:
+        return ""
+    try:
+        metadata = services.get_media_metadata(
+            MediaTypes.TV.value,
+            show.item.media_id,
+            show.item.source,
+        )
+    except services.ProviderAPIError:
+        logger.info("TMDB status unavailable for %s", show.item.media_id)
+        return ""
+    return (metadata.get("details") or {}).get("status") or ""
 
 
 def needs_release_dates(user):
