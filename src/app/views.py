@@ -147,10 +147,7 @@ def dashboard_view(request):
     return render(
         request,
         "app/dashboard.html",
-        {
-            "rows": dashboard.build_rows(request.user),
-            "release_dates_pending": dashboard.needs_release_dates(request.user),
-        },
+        dashboard.page(request.user),
     )
 
 

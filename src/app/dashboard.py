@@ -1,6 +1,8 @@
 import logging
+from datetime import timedelta
 from urllib.parse import urlencode
 
+from django.conf import settings
 from django.core.cache import cache
 from django.db.models import (
     Exists,
@@ -44,6 +46,23 @@ class _ListedMedia:
         self.repeats = 0
         self.end_date = None
         self.start_date = None
+
+
+def page(user):
+    """Return the dashboard template context."""
+    rows = build_rows(user)
+    pending = needs_release_dates(user)
+    quiet = (
+        not pending
+        and not any(row.get("key") == "caught_up" for row in rows)
+        and TV.objects.filter(user=user, status=Status.IN_PROGRESS.value).exists()
+    )
+    return {
+        "rows": rows,
+        "release_dates_pending": pending,
+        "caught_up_quiet": quiet,
+        "caught_up_days": settings.DASHBOARD_CAUGHT_UP_DAYS,
+    }
 
 
 def build_rows(user):
@@ -212,11 +231,13 @@ def needs_release_dates(user):
 
 
 def _caught_up_row(user):
-    """In-progress shows with every aired episode watched, newest watch first."""
+    """Recent in-progress shows with every aired episode watched."""
+    cutoff = timezone.now() - timedelta(days=settings.DASHBOARD_CAUGHT_UP_DAYS)
     queryset = (
         TV.objects.filter(user=user, status=Status.IN_PROGRESS.value)
         .filter(Exists(_aired_events()))
         .exclude(Exists(_unwatched_aired()))
+        .filter(_recent_activity(cutoff))
         .select_related("item")
         .annotate(
             last_watched_at=Max(
@@ -233,6 +254,7 @@ def _caught_up_row(user):
     )
     _prefetch_episodes(shows)
     return {
+        "key": "caught_up",
         "title": _("Caught up"),
         "see_all": _media_list_url(
             user,
@@ -305,6 +327,16 @@ def _model(media_type):
 def _media_list_url(user, media_type, query):
     base = reverse("medialist", args=[user.username, media_type])
     return f"{base}?{urlencode(query)}"
+
+
+def _recent_activity(cutoff):
+    """Match a non-special episode watched or aired on or after the cutoff."""
+    recent_watch = Episode.objects.filter(
+        related_season__related_tv=OuterRef("pk"),
+        related_season__item__season_number__gt=0,
+        end_date__gte=cutoff,
+    )
+    return Exists(recent_watch) | Exists(_aired_events().filter(datetime__gte=cutoff))
 
 
 def _aired_events():

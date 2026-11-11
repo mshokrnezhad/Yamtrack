@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
-from django.utils import timezone
+from django.utils import formats, timezone
 
 from app.dashboard import (
     ROW_LIMIT,
@@ -16,6 +16,7 @@ from app.dashboard import (
     build_rows,
     complete_finished_shows,
     needs_release_dates,
+    page,
     refresh_for_user,
 )
 from app.models import (
@@ -30,6 +31,7 @@ from app.models import (
     Status,
 )
 from app.providers.services import ProviderAPIError
+from app.templatetags.app_tags import compact_date
 from events.models import Event
 from lists.models import CustomList
 
@@ -230,6 +232,43 @@ class DashboardRowTests(TestCase):
         self.assertNotIn("Behind", titles)
         self.assertNotIn("Waiting", titles)
         self.assertNotIn("Finished", titles)
+
+    def test_caught_up_keeps_a_recent_watch_or_air_date(self):
+        """Keep a show with a recent watch or air date, and drop an older one."""
+        now = timezone.now()
+        self._show_with_episode("360", "Watched", now - timedelta(days=2))
+        aired = self._tv("361", "Aired", Status.IN_PROGRESS.value)
+        season = self._season(aired, 1)
+        self._air(season, 1, now - timedelta(days=4))
+        self._watch(season, 1, now - timedelta(days=90))
+        stale = self._show_with_episode("362", "Stale", now - timedelta(days=90))
+        special = self._season(stale, 0)
+        self._air(special, 1, now - timedelta(days=1))
+        self._watch(special, 1, now)
+
+        row = _caught_up_row(self.user)
+
+        self.assertEqual(self._titles(row), ["Watched", "Aired"])
+        self.assertIn("status=In+progress", row["see_all"])
+        self.assertNotIn("sort=", row["see_all"])
+        stale.refresh_from_db()
+        self.assertEqual(stale.status, Status.IN_PROGRESS.value)
+        context = page(self.user)
+        self.assertFalse(context["caught_up_quiet"])
+        self.assertFalse(context["release_dates_pending"])
+
+    def test_old_caught_up_show_is_hidden_and_stays_in_progress(self):
+        """A show outside the window leaves the row without changing status."""
+        watched = timezone.now() - timedelta(days=90)
+        show = self._show_with_episode("363", "Archive", watched)
+
+        self.assertNotIn("Caught up", [row["title"] for row in build_rows(self.user)])
+        show.refresh_from_db()
+        self.assertEqual(show.status, Status.IN_PROGRESS.value)
+        context = page(self.user)
+        self.assertTrue(context["caught_up_quiet"])
+        self.assertFalse(context["release_dates_pending"])
+        self.assertEqual(context["caught_up_days"], 60)
 
     def test_caught_up_cards_include_the_public_score(self):
         """Each caught-up card carries the annotated public score."""
@@ -515,9 +554,140 @@ class DashboardViewTests(TestCase):
 
         self.assertContains(
             response,
-            "Caught up shows up here after release dates load",
+            "last 60 days appear here after release dates load",
         )
         self.assertNotContains(response, ">Caught up<")
+
+    def test_old_caught_up_show_explains_the_window(self):
+        """An older caught-up show stays off the row and the page says why."""
+        with (
+            patch("app.providers.services.get_media_metadata", return_value=METADATA),
+            patch("app.models.Item.fetch_releases"),
+        ):
+            item = Item.objects.create(
+                media_id="363",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.TV.value,
+                title="Archive",
+                image="http://example.com/a.jpg",
+            )
+            show = TV.objects.create(
+                item=item,
+                user=self.user,
+                status=Status.IN_PROGRESS.value,
+                score=8,
+            )
+            season_item = Item.objects.create(
+                media_id="363",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.SEASON.value,
+                title="Archive",
+                image="http://example.com/a.jpg",
+                season_number=1,
+            )
+            season = Season.objects.create(
+                item=season_item,
+                user=self.user,
+                related_tv=show,
+                status=Status.IN_PROGRESS.value,
+            )
+            watched = timezone.now() - timedelta(days=90)
+            Event.objects.create(
+                item=season_item,
+                content_number=1,
+                datetime=watched - timedelta(days=1),
+            )
+            episode_item = Item.objects.create(
+                media_id="363",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.EPISODE.value,
+                title="Archive",
+                image="http://example.com/a.jpg",
+                season_number=1,
+                episode_number=1,
+            )
+            Episode.objects.bulk_create(
+                [Episode(item=episode_item, related_season=season, end_date=watched)],
+            )
+
+        response = self.client.get(reverse("dashboard"))
+
+        self.assertContains(response, "No shows caught up in the last 60 days")
+        self.assertContains(response, "Older shows stay In progress")
+        self.assertNotContains(response, ">Caught up<")
+        self.assertNotContains(response, "release dates load")
+
+    def test_dashboard_card_uses_a_short_date_beside_the_score(self):
+        """The date badge is short enough to share the card with the score star."""
+        watched = timezone.now() - timedelta(days=1)
+        with (
+            patch("app.providers.services.get_media_metadata", return_value=METADATA),
+            patch("app.models.Item.fetch_releases"),
+        ):
+            item = Item.objects.create(
+                media_id="364",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.TV.value,
+                title="Recent",
+                image="http://example.com/a.jpg",
+            )
+            show = TV.objects.create(
+                item=item,
+                user=self.user,
+                status=Status.IN_PROGRESS.value,
+                score=8,
+            )
+            season_item = Item.objects.create(
+                media_id="364",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.SEASON.value,
+                title="Recent",
+                image="http://example.com/a.jpg",
+                season_number=1,
+            )
+            season = Season.objects.create(
+                item=season_item,
+                user=self.user,
+                related_tv=show,
+                status=Status.IN_PROGRESS.value,
+            )
+            Event.objects.create(
+                item=season_item,
+                content_number=1,
+                datetime=watched - timedelta(days=1),
+            )
+            episode_item = Item.objects.create(
+                media_id="364",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.EPISODE.value,
+                title="Recent",
+                image="http://example.com/a.jpg",
+                season_number=1,
+                episode_number=1,
+            )
+            Episode.objects.bulk_create(
+                [Episode(item=episode_item, related_season=season, end_date=watched)],
+            )
+
+        response = self.client.get(reverse("dashboard"))
+
+        self.assertContains(response, compact_date(watched))
+        self.assertNotContains(
+            response,
+            timezone.localtime(watched).strftime("%Y-%m-%d"),
+        )
+        self.assertNotContains(response, "sm:right-2")
+        self.assertContains(response, "My rating")
+
+    def test_compact_date_drops_the_year_only_for_this_year(self):
+        """This year is month and day. Another year keeps the year and drops the day."""
+        today = timezone.localtime()
+        older = today - timedelta(days=400)
+
+        self.assertEqual(compact_date(today), formats.date_format(today, "M j"))
+        self.assertNotIn(str(today.year), compact_date(today))
+        self.assertEqual(compact_date(older), formats.date_format(older, "M Y"))
+        self.assertIn(str(older.year), compact_date(older))
 
     @patch("app.tasks.refresh_dashboard.delay")
     def test_refresh_queues_the_job_and_says_it_is_refreshing(self, delay):

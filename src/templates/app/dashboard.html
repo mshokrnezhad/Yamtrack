@@ -25,23 +25,29 @@
       <section class="min-w-0">
         <div class="mb-3 flex items-baseline justify-between gap-4">
           <h2 class="text-xl font-semibold text-white">{{ row.title }}</h2>
-          <a href="{{ row.see_all }}"
-             class="shrink-0 text-sm text-indigo-400 hover:text-indigo-300">{% trans "See all" %}</a>
+          {% if row.see_all %}
+            <a href="{{ row.see_all }}"
+               class="shrink-0 text-sm text-indigo-400 hover:text-indigo-300">{% trans "See all" %}</a>
+          {% endif %}
         </div>
         <div class="dashboard-row">
           {% for media in row.media %}
             <div class="dashboard-card">
-              {% include "app/components/media_card.html" with media=media item=media.item title=media.item from_grid=True media_type=row.media_type %}
+              {% include "app/components/media_card.html" with media=media item=media.item title=media.item from_grid=True dashboard_card=True media_type=row.media_type %}
             </div>
           {% endfor %}
         </div>
       </section>
     {% empty %}
-      <p class="text-gray-400">{% trans "Nothing to show yet." %}</p>
+      {% if not caught_up_quiet %}
+        <p class="text-gray-400">{% trans "Nothing to show yet." %}</p>
+      {% endif %}
     {% endfor %}
 
     {% if release_dates_pending %}
-      <p class="text-sm text-gray-400">{% trans "Caught up shows up here after release dates load for your in-progress shows." %}</p>
+      <p class="text-sm text-gray-400">{% blocktrans with days=caught_up_days %}Caught up shows from the last {{ days }} days appear here after release dates load for your in-progress shows.{% endblocktrans %}</p>
+    {% elif caught_up_quiet %}
+      <p class="text-sm text-gray-400">{% blocktrans with days=caught_up_days %}No shows caught up in the last {{ days }} days. Older shows stay In progress.{% endblocktrans %}</p>
     {% endif %}
   </div>
 {% endblock content %}

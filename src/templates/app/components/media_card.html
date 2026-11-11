@@ -20,16 +20,16 @@
           {% endif %}
 
           {% if media.end_date is not None %}
-            <span class="text-sm text-white">{{ media.end_date|date_format:user }}</span>
+            <span class="text-sm text-white">{% if dashboard_card %}{{ media.end_date|compact_date }}{% else %}{{ media.end_date|date_format:user }}{% endif %}</span>
           {% elif media.start_date is not None %}
-            <span class="text-sm text-white">{{ media.start_date|date_format:user }}</span>
+            <span class="text-sm text-white">{% if dashboard_card %}{{ media.start_date|compact_date }}{% else %}{{ media.start_date|date_format:user }}{% endif %}</span>
           {% endif %}
 
         </div>
       {% endif %}
 
       {% if media.score|show_media_score:user %}
-        <div class="absolute {% if from_grid %}sm:top-2 sm:right-2 sm:left-auto{% endif %} top-10 left-2 bg-gray-900/90 text-white text-xs px-2 py-1 rounded-md flex items-center shadow-md"
+        <div class="absolute {% if from_grid and not dashboard_card %}sm:top-2 sm:right-2 sm:left-auto{% endif %} top-10 left-2 bg-gray-900/90 text-white text-xs px-2 py-1 rounded-md flex items-center shadow-md"
              title="{% trans 'My rating' %}">
           {% include "app/icons/star.svg" with classes="w-4 h-4 text-yellow-400 mr-1 fill-current" %}
           <span class="text-sm text-white">{{ media.formatted_score }}</span>

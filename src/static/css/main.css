@@ -2674,22 +2674,27 @@
   scroll-snap-type: x mandatory;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
-  scrollbar-width: thin;
-  scrollbar-color: #4b5563 transparent;
+  scrollbar-width: none;
 }
 .dashboard-row::-webkit-scrollbar {
-  height: 6px;
+  display: none;
 }
-.dashboard-row::-webkit-scrollbar-thumb {
-  background: #4b5563;
-  border-radius: 999px;
-}
-@media (width < 48rem) {
+@media (width >= 48rem) {
   .dashboard-row {
-    scrollbar-width: none;
+    scrollbar-width: auto;
+    scrollbar-color: #f3f4f6 #374151;
   }
   .dashboard-row::-webkit-scrollbar {
-    display: none;
+    display: block;
+    height: 12px;
+  }
+  .dashboard-row::-webkit-scrollbar-track {
+    background: #374151;
+  }
+  .dashboard-row::-webkit-scrollbar-thumb {
+    background: #f3f4f6;
+    border: 2px solid #374151;
+    border-radius: 999px;
   }
 }
 .dashboard-card {

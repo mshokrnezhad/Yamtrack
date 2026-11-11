@@ -188,6 +188,18 @@ def inline_code(text, html_class):
 
 
 @register.filter
+def compact_date(value):
+    """Return a short date that fits a dashboard card next to the score."""
+    if not value:
+        return ""
+    if isinstance(value, timezone.datetime) and timezone.is_aware(value):
+        value = timezone.localtime(value)
+    if value.year == timezone.localdate().year:
+        return formats.date_format(value, "M j")
+    return formats.date_format(value, "M Y")
+
+
+@register.filter
 def date_format(datetime, user):
     """Format a datetime using user's preferred date format (date only, no time).
 
