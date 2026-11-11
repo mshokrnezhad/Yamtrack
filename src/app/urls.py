@@ -15,6 +15,7 @@ urlpatterns = [
         views.dashboard_refresh_status,
         name="dashboard_refresh_status",
     ),
+    path("dashboard/<slug:row_key>", views.dashboard_row, name="dashboard_row"),
     path("<str:username>/<media_type:media_type>", views.media_list, name="medialist"),
     path("search", views.media_search, name="search"),
     path(

@@ -1,0 +1,5 @@
+{% for entry in entries %}
+  <div {% if forloop.last and has_next %} hx-get="{% url 'dashboard_row' key %}?page={{ next_page }}" hx-trigger="revealed threshold:200px" hx-swap="afterend" hx-indicator="#loading-indicator" {% endif %}>
+    {% include "app/components/media_card.html" with media=entry item=entry.item title=entry.item from_grid=True dashboard_card=True media_type=media_type %}
+  </div>
+{% endfor %}

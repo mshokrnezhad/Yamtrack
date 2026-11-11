@@ -40,6 +40,33 @@ You can try the app at [yamtrack.fuzzygrim.com](https://yamtrack.fuzzygrim.com) 
 - 📥 Import from [Trakt](https://trakt.tv/), [Simkl](https://simkl.com/), [MyAnimeList](https://myanimelist.net/), [AniList](https://anilist.co/) and [Kitsu](https://kitsu.app/) with support for periodic automatic imports.
 - 📊 Export all your tracked media to a CSV file and import it back.
 
+## Personal dashboard
+
+This fork opens on a personal dashboard with five rows. Each row shows 10 titles. **See all** opens the same titles in the same order, without that cap, as a responsive grid of the same cards. Long lists load further pages as you scroll.
+
+| Row | Route | What it lists |
+| --- | --- | --- |
+| Top Downloaded movies | `/dashboard/top-downloaded-movies` | Movies in your Downloaded list, highest public score first |
+| Top Planning movies | `/dashboard/top-planning-movies` | Movies you marked Planning, highest public score first |
+| Top Downloaded TV | `/dashboard/top-downloaded-tv` | TV shows in your Downloaded list, highest public score first |
+| Top Planning TV | `/dashboard/top-planning-tv` | TV shows you marked Planning, highest public score first |
+| Continue watching | `/dashboard/continue-watching` | In progress shows that still have an aired episode you have not watched (specials excluded), most recently watched first |
+
+Continue watching cards show the next episode (for example `S1E2`) and how many aired episodes are left. Downloaded and Planning cards show the public score.
+
+**Refresh** reloads your calendar, then marks a show completed when it has ended or been canceled and every aired episode is watched.
+
+The public score is a weighted average of IMDb, Rotten Tomatoes, Metacritic, TMDB, and a manual Letterboxd score. Weights are per user. A source with too few votes is left out of the average; its rating still shows on the detail page.
+
+| Setting | Role |
+| --- | --- |
+| `OMDB_API_KEY` | Optional [OMDb](https://www.omdbapi.com/) key. Without it, IMDb, Rotten Tomatoes, and Metacritic stay empty. |
+| `OMDB_DAILY_LIMIT` | Maximum OMDb requests per day. Default `900`. |
+| `PUBLIC_SCORE_MIN_IMDB_VOTES` | IMDb scores with fewer votes are left out of the public score. Default `1000`. |
+| `PUBLIC_SCORE_MIN_TMDB_VOTES` | TMDB scores with fewer votes are left out of the public score. Default `50`. |
+
+`manage.py backfill_public_ratings` fills those scores for movies, TV, and anime already in the library. It runs in batches and stops calling OMDb once `OMDB_DAILY_LIMIT` is reached.
+
 ## 📱 Screenshots
 
 | Homepage                                                                                       | Calendar                                                                                    |

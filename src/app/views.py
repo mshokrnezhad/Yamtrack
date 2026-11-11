@@ -151,6 +151,19 @@ def dashboard_view(request):
     )
 
 
+@require_GET
+def dashboard_row(request, row_key):
+    """One dashboard row, without the ten-item cap."""
+    context = dashboard.row_page(request.user, row_key, request.GET.get("page"))
+    if context is None:
+        msg = "Dashboard row not found"
+        raise Http404(msg)
+    template = "app/dashboard_row.html"
+    if request.headers.get("HX-Request"):
+        template = "app/components/dashboard_grid_items.html"
+    return render(request, template, context)
+
+
 @require_POST
 def progress_edit(request, media_type, instance_id):
     """Increase or decrease the progress of a media item from home page."""

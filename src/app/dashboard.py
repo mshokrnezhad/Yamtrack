@@ -1,5 +1,4 @@
 import logging
-from urllib.parse import urlencode
 
 from django.core.cache import cache
 from django.db.models import (
@@ -27,9 +26,18 @@ from lists.models import CustomList
 logger = logging.getLogger(__name__)
 
 ROW_LIMIT = 10
+PAGE_SIZE = 32
 DOWNLOADED_LIST = "Downloaded"
 REFRESH_COOLDOWN = 60
 FINISHED_TMDB_STATUSES = frozenset({"Ended", "Canceled"})
+_UNSET = object()
+_ROWS = {
+    "top-downloaded-movies": ("downloaded", MediaTypes.MOVIE.value),
+    "top-planning-movies": ("planning", MediaTypes.MOVIE.value),
+    "top-downloaded-tv": ("downloaded", MediaTypes.TV.value),
+    "top-planning-tv": ("planning", MediaTypes.TV.value),
+    "continue-watching": ("continue", MediaTypes.TV.value),
+}
 
 
 class _ListedMedia:
@@ -46,43 +54,124 @@ class _ListedMedia:
         self.start_date = None
 
 
+def _title(key):
+    """Return the heading for a dashboard row."""
+    titles = {
+        "top-downloaded-movies": _("Top Downloaded movies"),
+        "top-planning-movies": _("Top Planning movies"),
+        "top-downloaded-tv": _("Top Downloaded TV"),
+        "top-planning-tv": _("Top Planning TV"),
+        "continue-watching": _("Continue watching"),
+    }
+    return titles[key]
+
+
+def _key(kind, media_type):
+    """Return the route key for a row kind and media type."""
+    for key, row in _ROWS.items():
+        if row == (kind, media_type):
+            return key
+    message = "Unknown dashboard row"
+    raise KeyError(message)
+
+
 def build_rows(user):
     """Return the dashboard rows that have something to show."""
-    downloaded = (
-        CustomList.objects.filter(
-            owner=user,
-            name=DOWNLOADED_LIST,
-        )
-        .order_by("id")
-        .first()
-    )
+    downloaded = _downloaded_list(user)
     rows = [
         _list_row(
             user,
             downloaded,
             MediaTypes.MOVIE.value,
-            _("Top Downloaded movies"),
+            _title("top-downloaded-movies"),
         ),
-        _planning_row(user, MediaTypes.MOVIE.value, _("Top Planning movies")),
-        _list_row(
-            user,
-            downloaded,
-            MediaTypes.TV.value,
-            _("Top Downloaded TV"),
-        ),
-        _planning_row(user, MediaTypes.TV.value, _("Top Planning TV")),
+        _planning_row(user, MediaTypes.MOVIE.value, _title("top-planning-movies")),
+        _list_row(user, downloaded, MediaTypes.TV.value, _title("top-downloaded-tv")),
+        _planning_row(user, MediaTypes.TV.value, _title("top-planning-tv")),
     ]
     rows = [row for row in rows if row["media"]]
     rows.append(_continue_row(user))
     return rows
 
 
+def row_page(user, key, page):
+    """Return one page of the same ordered items as that dashboard row."""
+    if key not in _ROWS:
+        return None
+    records, has_next, number = _slice_page(_ordered(user, key), page)
+    return {
+        "key": key,
+        "title": _title(key),
+        "media_type": _ROWS[key][1],
+        "entries": _cards(user, key, records),
+        "has_next": has_next,
+        "next_page": number + 1,
+    }
+
+
+def _ordered(user, key, *, downloaded=_UNSET):
+    """Return the ordered queryset for a row, with no length limit.
+
+    The dashboard row and its See all page both call this.
+    """
+    kind, media_type = _ROWS[key]
+    if kind == "downloaded":
+        if downloaded is _UNSET:
+            downloaded = _downloaded_list(user)
+        return _downloaded_items(user, downloaded, media_type)
+    if kind == "planning":
+        return _planning_entries(user, media_type)
+    return _continue_shows(user)
+
+
+def _slice_page(queryset, page):
+    """Return one page and whether another follows, without a count query."""
+    number = _page_number(page)
+    start = (number - 1) * PAGE_SIZE
+    window = list(queryset[start : start + PAGE_SIZE + 1])
+    return window[:PAGE_SIZE], len(window) > PAGE_SIZE, number
+
+
+def _page_number(page):
+    """Return a page number of at least 1."""
+    try:
+        number = int(page)
+    except (TypeError, ValueError):
+        return 1
+    if number < 1:
+        return 1
+    return number
+
+
+def _downloaded_list(user):
+    """Return the user's Downloaded list, if they have one."""
+    return (
+        CustomList.objects.filter(owner=user, name=DOWNLOADED_LIST)
+        .order_by("id")
+        .first()
+    )
+
+
 def _list_row(user, custom_list, media_type, title):
     """Movies or shows in the Downloaded list, highest public score first."""
+    key = _key("downloaded", media_type)
     if custom_list is None:
         return {"title": title, "see_all": "", "media_type": media_type, "media": []}
 
-    items = _by_public_score(
+    items = list(_ordered(user, key, downloaded=custom_list)[:ROW_LIMIT])
+    return {
+        "title": title,
+        "see_all": reverse("dashboard_row", args=[key]),
+        "media_type": media_type,
+        "media": _cards(user, key, items),
+    }
+
+
+def _downloaded_items(user, custom_list, media_type):
+    """Return downloaded titles of this type, highest public score first."""
+    if custom_list is None:
+        return Item.objects.none()
+    return _by_public_score(
         annotate_public_rating(
             Item.objects.filter(
                 custom_lists=custom_list,
@@ -97,7 +186,46 @@ def _list_row(user, custom_list, media_type, title):
         "title",
         "dashboard_score",
     )
-    items = list(items[:ROW_LIMIT])
+
+
+def _planning_row(user, media_type, title):
+    """Tracked Planning titles, highest public score first."""
+    key = _key("planning", media_type)
+    media = list(_ordered(user, key)[:ROW_LIMIT])
+    return {
+        "title": title,
+        "see_all": reverse("dashboard_row", args=[key]),
+        "media_type": media_type,
+        "media": _cards(user, key, media),
+    }
+
+
+def _planning_entries(user, media_type):
+    """Return Planning entries of this type, highest public score first."""
+    model = _model(media_type)
+    return _by_public_score(
+        annotate_public_rating(
+            _latest(model.objects.filter(user=user, status=Status.PLANNING.value)),
+            user,
+        ),
+        "item__title",
+    ).select_related("item")
+
+
+def _cards(user, key, records):
+    """Turn an ordered slice into the cards both views render."""
+    kind, media_type = _ROWS[key]
+    if kind == "downloaded":
+        return _attach_tracking(user, media_type, records)
+    if kind == "planning" and media_type == MediaTypes.TV.value:
+        _prefetch_episodes(records)
+    elif kind == "continue":
+        _label_continue(records)
+    return records
+
+
+def _attach_tracking(user, media_type, items):
+    """Pair each list item with the user's tracking row, when they have one."""
     tracked = _tracked_for(user, media_type, [item.id for item in items])
     media = []
     for item in items:
@@ -107,37 +235,7 @@ def _list_row(user, custom_list, media_type, title):
         else:
             entry.public_rating = item.dashboard_score
         media.append(entry)
-    return {
-        "title": title,
-        "see_all": f"{reverse('list_detail', args=[custom_list.id])}?type={media_type}",
-        "media_type": media_type,
-        "media": media,
-    }
-
-
-def _planning_row(user, media_type, title):
-    """Tracked Planning titles, highest public score first."""
-    model = _model(media_type)
-    queryset = _by_public_score(
-        annotate_public_rating(
-            _latest(model.objects.filter(user=user, status=Status.PLANNING.value)),
-            user,
-        ),
-        "item__title",
-    ).select_related("item")
-    media = list(queryset[:ROW_LIMIT])
-    if media_type == MediaTypes.TV.value:
-        _prefetch_episodes(media)
-    return {
-        "title": title,
-        "see_all": _media_list_url(
-            user,
-            media_type,
-            {"status": Status.PLANNING.value, "sort": "public_rating"},
-        ),
-        "media_type": media_type,
-        "media": media,
-    }
+    return media
 
 
 def queue_refresh(user):
@@ -202,6 +300,19 @@ def _tmdb_status(show):
 
 def _continue_row(user):
     """In-progress shows with an aired episode still to watch, newest watch first."""
+    key = "continue-watching"
+    shows = list(_ordered(user, key)[:ROW_LIMIT])
+    return {
+        "key": "continue",
+        "title": _title(key),
+        "see_all": reverse("dashboard_row", args=[key]),
+        "media_type": MediaTypes.TV.value,
+        "media": _cards(user, key, shows),
+    }
+
+
+def _continue_shows(user):
+    """Return in-progress shows with an aired episode left, newest watch first."""
     queryset = (
         TV.objects.filter(user=user, status=Status.IN_PROGRESS.value)
         .filter(Exists(_unwatched_aired()))
@@ -213,24 +324,10 @@ def _continue_row(user):
             ),
         )
     )
-    shows = list(
-        annotate_public_rating(queryset, user).order_by(
-            F("last_watched_at").desc(nulls_last=True),
-            Lower("item__title"),
-        )[:ROW_LIMIT],
+    return annotate_public_rating(queryset, user).order_by(
+        F("last_watched_at").desc(nulls_last=True),
+        Lower("item__title"),
     )
-    _label_continue(shows)
-    return {
-        "key": "continue",
-        "title": _("Continue watching"),
-        "see_all": _media_list_url(
-            user,
-            MediaTypes.TV.value,
-            {"status": Status.IN_PROGRESS.value},
-        ),
-        "media_type": MediaTypes.TV.value,
-        "media": shows,
-    }
 
 
 def _label_continue(shows):
@@ -340,11 +437,6 @@ def _model(media_type):
     if media_type == MediaTypes.TV.value:
         return TV
     return Movie
-
-
-def _media_list_url(user, media_type, query):
-    base = reverse("medialist", args=[user.username, media_type])
-    return f"{base}?{urlencode(query)}"
 
 
 def _aired_events():

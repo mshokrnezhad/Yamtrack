@@ -9,6 +9,7 @@ from django.urls import reverse
 from django.utils import formats, timezone
 
 from app.dashboard import (
+    PAGE_SIZE,
     ROW_LIMIT,
     _continue_row,
     _list_row,
@@ -222,8 +223,10 @@ class DashboardRowTests(TestCase):
         self.assertEqual(self._titles(row), ["Recent", "Older"])
         self.assertEqual(row["media"][0].next_episode, "S1E2")
         self.assertEqual(row["media"][0].episodes_remaining, 2)
-        self.assertIn("status=In+progress", row["see_all"])
-        self.assertNotIn("sort=", row["see_all"])
+        self.assertEqual(
+            row["see_all"],
+            reverse("dashboard_row", args=["continue-watching"]),
+        )
         recent.refresh_from_db()
         self.assertEqual(recent.status, Status.IN_PROGRESS.value)
 
@@ -400,6 +403,119 @@ class DashboardRowTests(TestCase):
         )
         self.assertEqual(rows[-1]["media"], [])
 
+    def test_see_all_page_matches_each_dashboard_row(self):
+        """The full page starts with the same ten items, in the same order."""
+        self.client.login(username="dash", password="test-pass")  # noqa: S106
+        own = self._list(self.user, "Downloaded")
+        extra = {}
+        for number in range(ROW_LIMIT + 1):
+            movie = self._movie_item(f"dm{number}", f"Downloaded movie {number:02d}")
+            self._score(movie, 50 - number, votes=5000)
+            own.items.add(movie)
+            planned = self._movie_item(f"pm{number}", f"Planning movie {number:02d}")
+            self._score(planned, 50 - number, votes=5000)
+            Movie.objects.create(
+                item=planned,
+                user=self.user,
+                status=Status.PLANNING.value,
+            )
+            downloaded_show = self._tv(
+                f"dt{number}",
+                f"Downloaded show {number:02d}",
+                Status.COMPLETED.value,
+            )
+            self._score(downloaded_show.item, 50 - number, votes=5000)
+            own.items.add(downloaded_show.item)
+            planned_show = self._tv(
+                f"pt{number}",
+                f"Planning show {number:02d}",
+                Status.PLANNING.value,
+            )
+            self._score(planned_show.item, 50 - number, votes=5000)
+            show = self._half_watched(
+                f"cw{number}",
+                f"Continue show {number:02d}",
+                timezone.now() - timedelta(days=number),
+            )
+            self._score(show.item, 80, votes=2000)
+            if number == ROW_LIMIT:
+                extra = {
+                    "top-downloaded-movies": movie,
+                    "top-planning-movies": planned,
+                    "top-downloaded-tv": downloaded_show.item,
+                    "top-planning-tv": planned_show.item,
+                    "continue-watching": show.item,
+                }
+
+        dashboard = self.client.get(reverse("dashboard"))
+        rows = {row["see_all"]: row["media"] for row in dashboard.context["rows"]}
+        for key, eleventh in extra.items():
+            with self.subTest(key=key):
+                url = reverse("dashboard_row", args=[key])
+                page = self.client.get(url)
+                shown = page.context["entries"]
+                row_media = rows[url]
+                self.assertEqual(page.status_code, 200)
+                self.assertEqual(
+                    [entry.item.id for entry in shown[:ROW_LIMIT]],
+                    [entry.item.id for entry in row_media],
+                )
+                self.assertEqual(
+                    [entry.public_rating for entry in shown[:ROW_LIMIT]],
+                    [entry.public_rating for entry in row_media],
+                )
+                self.assertEqual(len(row_media), ROW_LIMIT)
+                self.assertEqual(shown[ROW_LIMIT].item.id, eleventh.id)
+                self.assertContains(dashboard, f'href="{url}"')
+                self.assertContains(page, eleventh.title)
+                self.assertNotContains(dashboard, eleventh.title)
+                if key == "continue-watching":
+                    self.assertEqual(
+                        [entry.next_episode for entry in shown[:ROW_LIMIT]],
+                        [entry.next_episode for entry in row_media],
+                    )
+                    self.assertEqual(
+                        [entry.episodes_remaining for entry in shown[:ROW_LIMIT]],
+                        [entry.episodes_remaining for entry in row_media],
+                    )
+                    self.assertEqual(shown[ROW_LIMIT].next_episode, "S1E2")
+                    self.assertContains(page, "S1E2")
+                    self.assertContains(page, "2 left")
+                    self.assertContains(page, "Public score")
+
+    def test_see_all_page_loads_the_rest_in_the_same_order(self):
+        """A long row keeps going on the next page, still in score order."""
+        self.client.login(username="dash", password="test-pass")  # noqa: S106
+        for number in range(PAGE_SIZE + 1):
+            item = self._movie_item(f"p{number}", f"Plan {number:02d}")
+            self._score(item, PAGE_SIZE + 1 - number, votes=5000)
+            Movie.objects.create(
+                item=item,
+                user=self.user,
+                status=Status.PLANNING.value,
+            )
+
+        row = _planning_row(self.user, MediaTypes.MOVIE.value, "Top Planning movies")
+        page = self.client.get(reverse("dashboard_row", args=["top-planning-movies"]))
+        titles = [entry.item.title for entry in page.context["entries"]]
+
+        self.assertEqual(titles[:ROW_LIMIT], self._titles(row))
+        self.assertEqual(titles[0], "Plan 00")
+        self.assertEqual(titles[-1], f"Plan {PAGE_SIZE - 1:02d}")
+        self.assertEqual(len(titles), PAGE_SIZE)
+
+        nxt = self.client.get(
+            reverse("dashboard_row", args=["top-planning-movies"]) + "?page=2",
+            HTTP_HX_REQUEST="true",
+        )
+
+        self.assertEqual(
+            [entry.item.title for entry in nxt.context["entries"]],
+            [f"Plan {PAGE_SIZE:02d}"],
+        )
+        self.assertNotContains(nxt, "<h1")
+        self.assertContains(nxt, f"Plan {PAGE_SIZE:02d}")
+
     def _titles(self, row):
         return [entry.item.title for entry in row["media"]]
 
@@ -510,19 +626,21 @@ class DashboardViewTests(TestCase):
         )
 
     def test_page_shows_filled_rows_and_their_see_all_links(self):
-        """Filled rows render, empty rows do not, and See all points at the filter."""
+        """Filled rows render, empty rows do not, and See all opens that row."""
         response = self.client.get(reverse("dashboard"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Top Planning movies")
         self.assertContains(response, "Visible")
         self.assertContains(response, "See all")
-        self.assertContains(response, "status=Planning")
-        self.assertContains(response, "sort=public_rating")
+        self.assertContains(response, 'href="/dashboard/top-planning-movies"')
+        self.assertContains(response, 'href="/dashboard/continue-watching"')
+        self.assertNotContains(response, "status=Planning")
+        self.assertNotContains(response, "sort=public_rating")
         self.assertNotContains(response, "Top Downloaded movies")
         self.assertContains(response, "Continue watching")
         self.assertContains(response, "No shows in progress.")
-        self.assertContains(response, "status=In+progress")
+        self.assertNotContains(response, "status=In+progress")
         self.assertNotContains(response, "Caught up")
         self.assertContains(response, "dashboard-row")
         self.assertContains(response, 'href="/dashboard"')
@@ -720,3 +838,16 @@ class DashboardViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertIn(reverse("account_login"), response.url)
+
+        response = self.client.get(
+            reverse("dashboard_row", args=["continue-watching"]),
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("account_login"), response.url)
+
+    def test_unknown_dashboard_row_is_not_found(self):
+        """An unknown row key is a 404."""
+        response = self.client.get(reverse("dashboard_row", args=["missing"]))
+
+        self.assertEqual(response.status_code, 404)
