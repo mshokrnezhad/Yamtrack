@@ -227,6 +227,35 @@ class DashboardRowTests(TestCase):
         recent.refresh_from_db()
         self.assertEqual(recent.status, Status.IN_PROGRESS.value)
 
+    def test_continue_counts_aired_episodes_beyond_stored_seasons(self):
+        """An unstored aired season supplies the next episode and the full count."""
+        now = timezone.now()
+        show = self._show_with_episode("360", "Partial", now)
+        season = show.seasons.get(item__season_number=1)
+        self._air(season, 2, now - timedelta(days=1))
+        self._watch(season, 2, now)
+        later = Item.objects.create(
+            media_id=show.item.media_id,
+            source=show.item.source,
+            media_type=MediaTypes.SEASON.value,
+            title=show.item.title,
+            image=show.item.image,
+            season_number=2,
+        )
+        for number in (1, 2, 3):
+            Event.objects.create(
+                item=later,
+                content_number=number,
+                datetime=now - timedelta(days=1),
+            )
+        self._show_with_episode("361", "Finished", now)
+
+        row = _continue_row(self.user)
+
+        self.assertEqual(self._titles(row), ["Partial"])
+        self.assertEqual(row["media"][0].next_episode, "S2E1")
+        self.assertEqual(row["media"][0].episodes_remaining, 3)
+
     def test_continue_cards_include_the_public_score(self):
         """Each continue card carries the annotated public score."""
         show = self._half_watched("311", "Scored", timezone.now())
@@ -352,10 +381,10 @@ class DashboardRowTests(TestCase):
         self.assertEqual(self._titles(_continue_row(self.user)), ["No Dates"])
 
     def test_continue_loads_episodes_without_a_query_per_show(self):
-        """Continue watching is one show query plus the prefetches."""
+        """Continue watching loads aired and watched episodes in bulk."""
         self._half_watched("310", "Ready", timezone.now())
 
-        with self.assertNumQueries(4):
+        with self.assertNumQueries(3):
             _continue_row(self.user)
 
     def test_empty_rows_are_left_out(self):

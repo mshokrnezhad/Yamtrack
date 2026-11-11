@@ -237,28 +237,51 @@ def _label_continue(shows):
     """Mark each card with its next aired episode and how many remain."""
     if not shows:
         return
-    now = timezone.now()
-    prefetch_related_objects(shows, _continue_prefetch(now))
+    pending = _pending_episodes(shows)
     for show in shows:
-        pending = []
-        for season in show.seasons.all():
-            number = season.item.season_number
-            if not number:
-                continue
-            watched = {
-                episode.item.episode_number
-                for episode in season.episodes.all()
-                if episode.end_date is not None
-            }
-            for event in season.item.event_set.all():
-                if event.datetime > now or event.content_number in watched:
-                    continue
-                pending.append((number, event.content_number))
-        if not pending:
+        episodes = pending[show.pk]
+        if not episodes:
             continue
-        pending.sort()
-        show.next_episode = f"S{pending[0][0]}E{pending[0][1]}"
-        show.episodes_remaining = len(pending)
+        season, number = min(episodes)
+        show.next_episode = f"S{season}E{number}"
+        show.episodes_remaining = len(episodes)
+
+
+def _pending_episodes(shows):
+    """Return aired, unwatched episodes for each show, including unstored seasons."""
+    by_item = {}
+    for show in shows:
+        by_item.setdefault((show.item.media_id, show.item.source), []).append(show.pk)
+    aired = Event.objects.filter(
+        item__media_id__in={media_id for media_id, _source in by_item},
+        item__source__in={source for _media_id, source in by_item},
+        item__media_type=MediaTypes.SEASON.value,
+        item__season_number__gt=0,
+        content_number__isnull=False,
+        datetime__lte=timezone.now(),
+    ).values_list(
+        "item__media_id",
+        "item__source",
+        "item__season_number",
+        "content_number",
+    )
+    watched = set(
+        Episode.objects.filter(
+            related_season__related_tv_id__in=[show.pk for show in shows],
+            related_season__item__season_number__gt=0,
+            end_date__isnull=False,
+        ).values_list(
+            "related_season__related_tv_id",
+            "related_season__item__season_number",
+            "item__episode_number",
+        ),
+    )
+    pending = {show.pk: set() for show in shows}
+    for media_id, source, season, episode in aired:
+        for show_id in by_item.get((media_id, source), ()):
+            if (show_id, season, episode) not in watched:
+                pending[show_id].add((season, episode))
+    return pending
 
 
 def _by_public_score(queryset, title_field, score_field="public_rating"):
@@ -322,17 +345,6 @@ def _model(media_type):
 def _media_list_url(user, media_type, query):
     base = reverse("medialist", args=[user.username, media_type])
     return f"{base}?{urlencode(query)}"
-
-
-def _continue_prefetch(now):
-    aired = Event.objects.filter(content_number__isnull=False, datetime__lte=now)
-    return Prefetch(
-        "seasons",
-        queryset=Season.objects.select_related("item").prefetch_related(
-            Prefetch("episodes", queryset=Episode.objects.select_related("item")),
-            Prefetch("item__event_set", queryset=aired),
-        ),
-    )
 
 
 def _aired_events():
