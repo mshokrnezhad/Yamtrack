@@ -141,7 +141,13 @@ def format_source_value(value, suffix):
     return text
 
 
-def annotate_public_rating(queryset, user):
+def annotate_public_rating(
+    queryset,
+    user,
+    *,
+    relation="item__public_rating",
+    output="public_rating",
+):
     """Annotate ``public_rating`` using this user's weights. Missing scores are null."""
     weights = user_weights(user)
     numerator_terms = []
@@ -150,8 +156,8 @@ def annotate_public_rating(queryset, user):
         weight = weights[key]
         if weight <= 0:
             continue
-        field = f"item__public_rating__{key}_normalized"
-        present = _counts_toward_aggregate(key)
+        field = f"{relation}__{key}_normalized"
+        present = _counts_toward_aggregate(key, relation)
         numerator_terms.append(
             Case(
                 When(
@@ -172,7 +178,7 @@ def annotate_public_rating(queryset, user):
 
     empty = Value(None, output_field=SCORE_FIELD)
     if not numerator_terms:
-        return queryset.annotate(public_rating=empty)
+        return queryset.annotate(**{output: empty})
 
     numerator = _add_expressions(numerator_terms)
     denominator = _add_expressions(weight_terms)
@@ -184,11 +190,13 @@ def annotate_public_rating(queryset, user):
         _public_rating_numerator=numerator,
         _public_rating_weight=denominator,
     ).annotate(
-        public_rating=Case(
-            When(_public_rating_weight=0, then=empty),
-            default=Round(divided, precision=1),
-            output_field=SCORE_FIELD,
-        ),
+        **{
+            output: Case(
+                When(_public_rating_weight=0, then=empty),
+                default=Round(divided, precision=1),
+                output_field=SCORE_FIELD,
+            ),
+        },
     )
 
 
@@ -423,14 +431,14 @@ def _vote_minimum(key):
     return getattr(settings, VOTE_SETTINGS[key])
 
 
-def _counts_toward_aggregate(key):
+def _counts_toward_aggregate(key, relation="item__public_rating"):
     """Match sources that have a score and are not under the vote minimum."""
-    field = f"item__public_rating__{key}_normalized"
+    field = f"{relation}__{key}_normalized"
     present = Q(**{f"{field}__isnull": False})
     vote_field = VOTE_FIELDS.get(key)
     if vote_field is None:
         return present
-    votes = f"item__public_rating__{vote_field}"
+    votes = f"{relation}__{vote_field}"
     enough = Q(**{f"{votes}__isnull": True}) | Q(
         **{f"{votes}__gte": _vote_minimum(key)},
     )

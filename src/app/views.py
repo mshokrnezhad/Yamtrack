@@ -24,7 +24,7 @@ from django.utils import timezone
 from django.utils.translation import gettext as _
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from app import config, helpers, history_processor, ratings
+from app import config, dashboard, helpers, history_processor, ratings
 from app import home as home_helpers
 from app import statistics as stats
 from app.forms import EpisodeForm, ManualItemForm, get_form_class
@@ -111,6 +111,16 @@ def home(request):
         "items_limit": items_limit,
     }
     return render(request, "app/home.html", context)
+
+
+@require_GET
+def dashboard_view(request):
+    """Personal home rows for the logged-in user."""
+    return render(
+        request,
+        "app/dashboard.html",
+        {"rows": dashboard.build_rows(request.user)},
+    )
 
 
 @require_POST

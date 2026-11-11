@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% load i18n %}
+
+{% block title %}
+  {% trans "Dashboard" %} - Yamtrack
+{% endblock title %}
+
+{% block content %}
+  <div class="dashboard-rows space-y-8">
+    <h1 class="text-3xl font-bold">{% trans "Dashboard" %}</h1>
+
+    {% for row in rows %}
+      <section class="min-w-0">
+        <div class="mb-3 flex items-baseline justify-between gap-4">
+          <h2 class="text-xl font-semibold text-white">{{ row.title }}</h2>
+          <a href="{{ row.see_all }}"
+             class="shrink-0 text-sm text-indigo-400 hover:text-indigo-300">{% trans "See all" %}</a>
+        </div>
+        <div class="dashboard-row">
+          {% for media in row.media %}
+            <div class="dashboard-card">
+              {% include "app/components/media_card.html" with media=media item=media.item title=media.item from_grid=True media_type=row.media_type %}
+            </div>
+          {% endfor %}
+        </div>
+      </section>
+    {% empty %}
+      <p class="text-gray-400">{% trans "Nothing to show yet." %}</p>
+    {% endfor %}
+  </div>
+{% endblock content %}
