@@ -13,6 +13,7 @@ from app.dashboard import (
     _list_row,
     _planning_row,
     build_rows,
+    needs_release_dates,
 )
 from app.models import (
     TV,
@@ -226,6 +227,29 @@ class DashboardRowTests(TestCase):
         self.assertNotIn("Waiting", titles)
         self.assertNotIn("Finished", titles)
 
+    def test_caught_up_cards_include_the_public_score(self):
+        """Each caught-up card carries the annotated public score."""
+        show = self._show_with_episode("311", "Scored", timezone.now())
+        self._score(show.item, 80, votes=2000)
+
+        row = _caught_up_row(self.user)
+
+        self.assertEqual(len(row["media"]), 1)
+        self.assertEqual(row["media"][0].public_rating, Decimal("80.0"))
+
+    def test_in_progress_tv_without_events_needs_release_dates(self):
+        """No season events means Caught up stays hidden and the hint applies."""
+        show = self._tv("320", "No Dates", Status.IN_PROGRESS.value)
+
+        self.assertTrue(needs_release_dates(self.user))
+        self.assertNotIn("Caught up", [row["title"] for row in build_rows(self.user)])
+
+        season = self._season(show, 1)
+        self._air(season, 1, timezone.now() - timedelta(days=1))
+        self._watch(season, 1, timezone.now())
+
+        self.assertFalse(needs_release_dates(self.user))
+
     def test_caught_up_loads_episodes_without_a_query_per_show(self):
         """Caught up is the show query plus the season and episode prefetches."""
         self._show_with_episode("310", "Ready", timezone.now())
@@ -357,6 +381,34 @@ class DashboardViewTests(TestCase):
         self.assertNotContains(response, "Caught up")
         self.assertContains(response, "dashboard-row")
         self.assertContains(response, 'href="/dashboard"')
+        self.assertNotContains(response, "release dates load")
+
+    def test_page_hints_when_in_progress_tv_has_no_release_dates(self):
+        """The hint shows for in-progress TV that has no season events yet."""
+        with (
+            patch("app.providers.services.get_media_metadata", return_value=METADATA),
+            patch("app.models.Item.fetch_releases"),
+        ):
+            item = Item.objects.create(
+                media_id="9",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.TV.value,
+                title="Waiting",
+                image="http://example.com/a.jpg",
+            )
+            TV.objects.create(
+                item=item,
+                user=self.user,
+                status=Status.IN_PROGRESS.value,
+            )
+
+        response = self.client.get(reverse("dashboard"))
+
+        self.assertContains(
+            response,
+            "Caught up shows up here after release dates load",
+        )
+        self.assertNotContains(response, ">Caught up<")
 
     def test_anonymous_visitors_are_sent_to_login(self):
         """The dashboard is the private landing page."""

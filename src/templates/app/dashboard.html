@@ -27,5 +27,9 @@
     {% empty %}
       <p class="text-gray-400">{% trans "Nothing to show yet." %}</p>
     {% endfor %}
+
+    {% if release_dates_pending %}
+      <p class="text-sm text-gray-400">{% trans "Caught up shows up here after release dates load for your in-progress shows." %}</p>
+    {% endif %}
   </div>
 {% endblock content %}

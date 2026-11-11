@@ -87,7 +87,7 @@ def import_media(
                     **kwargs,
                 )
 
-        events.tasks.reload_calendar.delay()
+        events.tasks.reload_calendar.delay(user)
 
         return format_import_message(imported_counts, warnings)
 

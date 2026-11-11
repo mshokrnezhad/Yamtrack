@@ -131,9 +131,21 @@ def _planning_row(user, media_type, title):
     }
 
 
+def needs_release_dates(user):
+    """Return whether in-progress TV still has no season events."""
+    shows = TV.objects.filter(user=user, status=Status.IN_PROGRESS.value)
+    season_events = Event.objects.filter(
+        item__media_type=MediaTypes.SEASON.value,
+        item__season_number__gt=0,
+        item__media_id=OuterRef("item__media_id"),
+        item__source=OuterRef("item__source"),
+    )
+    return shows.exists() and not shows.filter(Exists(season_events)).exists()
+
+
 def _caught_up_row(user):
     """In-progress shows with every aired episode watched, newest watch first."""
-    shows = list(
+    queryset = (
         TV.objects.filter(user=user, status=Status.IN_PROGRESS.value)
         .filter(Exists(_aired_events()))
         .exclude(Exists(_unwatched_aired()))
@@ -144,9 +156,12 @@ def _caught_up_row(user):
                 filter=Q(seasons__item__season_number__gt=0),
             ),
         )
-        .order_by(F("last_watched_at").desc(nulls_last=True), Lower("item__title"))[
-            :ROW_LIMIT
-        ],
+    )
+    shows = list(
+        annotate_public_rating(queryset, user).order_by(
+            F("last_watched_at").desc(nulls_last=True),
+            Lower("item__title"),
+        )[:ROW_LIMIT],
     )
     _prefetch_episodes(shows)
     return {

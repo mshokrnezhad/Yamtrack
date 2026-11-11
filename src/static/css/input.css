@@ -58,11 +58,27 @@
   scroll-snap-type: x mandatory;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scrollbar-color: #4b5563 transparent;
 }
 
 .dashboard-row::-webkit-scrollbar {
-  display: none;
+  height: 6px;
+}
+
+.dashboard-row::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 999px;
+}
+
+@media (width < 48rem) {
+  .dashboard-row {
+    scrollbar-width: none;
+  }
+
+  .dashboard-row::-webkit-scrollbar {
+    display: none;
+  }
 }
 
 .dashboard-card {

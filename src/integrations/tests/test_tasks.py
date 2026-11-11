@@ -46,3 +46,14 @@ class ImportMediaLanguageTests(TestCase):
 
         self.assertEqual(active_languages, ["it-it"])
         self.assertEqual(translation.get_language(), language_before)
+
+    @patch("integrations.tasks.events.tasks.reload_calendar.delay")
+    def test_import_reloads_that_users_calendar(self, mock_reload):
+        """A finished import queues a calendar reload for the importing user."""
+
+        def importer(_identifier, _user, _mode):
+            return {}, None
+
+        import_media(importer, "identifier", self.user.id, "new")
+
+        mock_reload.assert_called_once_with(self.user)
