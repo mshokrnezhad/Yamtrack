@@ -97,7 +97,7 @@ class HelpersTest(TestCase):
 
         result = redirect_back(request)
 
-        mock_redirect.assert_called_once_with("home")
+        mock_redirect.assert_called_once_with("dashboard")
         self.assertEqual(result, "home_redirect")
 
     @patch("app.helpers.url_has_allowed_host_and_scheme")
@@ -119,7 +119,7 @@ class HelpersTest(TestCase):
 
     @patch("app.helpers.url_has_allowed_host_and_scheme")
     def test_redirect_back_htmx_without_next(self, mock_url_check):
-        """HTMX requests without a valid 'next' fall back to the home page."""
+        """HTMX requests without a valid 'next' fall back to the dashboard."""
         mock_url_check.return_value = False
 
         request = MagicMock()
@@ -130,7 +130,7 @@ class HelpersTest(TestCase):
 
         self.assertEqual(result.status_code, 204)
         location = json.loads(result["HX-Location"])
-        self.assertEqual(location["path"], reverse("home"))
+        self.assertEqual(location["path"], reverse("dashboard"))
 
     @patch("app.helpers.messages")
     def test_form_error_messages(self, mock_messages):

@@ -107,7 +107,7 @@ def redirect_back(request):
         response = HttpResponse(status=204)
         response["HX-Location"] = json.dumps(
             {
-                "path": clean_url or reverse("home"),
+                "path": clean_url or reverse("dashboard"),
                 "target": "body",
                 # show:none keeps the current scroll position after the swap
                 "swap": "innerHTML show:none",
@@ -119,7 +119,7 @@ def redirect_back(request):
     if clean_url:
         return HttpResponseRedirect(clean_url)
 
-    return redirect("home")
+    return redirect("dashboard")
 
 
 def form_error_messages(form, request):

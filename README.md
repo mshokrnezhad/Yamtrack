@@ -42,6 +42,8 @@ You can try the app at [yamtrack.fuzzygrim.com](https://yamtrack.fuzzygrim.com) 
 
 ## Personal dashboard
 
+`/` redirects to `/dashboard`. The upstream Home view lives at `/home`.
+
 This fork opens on a personal dashboard with five rows. Each row shows 10 titles. **See all** opens the same titles in the same order, without that cap, as a responsive grid of the same cards. Long lists load further pages as you scroll.
 
 | Row | Route | What it lists |

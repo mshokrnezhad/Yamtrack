@@ -1,4 +1,6 @@
+from django.contrib.auth.decorators import login_not_required
 from django.urls import path, register_converter
+from django.views.generic import RedirectView
 
 from app import converters, views
 
@@ -7,7 +9,18 @@ register_converter(converters.SourceChecker, "source")
 
 
 urlpatterns = [
-    path("", views.home, name="home"),
+    path(
+        "",
+        login_not_required(
+            RedirectView.as_view(
+                pattern_name="dashboard",
+                permanent=False,
+                query_string=False,
+            ),
+        ),
+        name="root",
+    ),
+    path("home", views.home, name="home"),
     path("dashboard", views.dashboard_view, name="dashboard"),
     path("dashboard/refresh", views.dashboard_refresh, name="dashboard_refresh"),
     path(

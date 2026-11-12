@@ -1,8 +1,13 @@
+import json
+import re
+from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import TestCase
-from django.urls import reverse
+from django.urls import resolve, reverse
 from django.utils import timezone
 
 from app.models import (
@@ -442,3 +447,132 @@ class HomeViewTests(TestCase):
         self.assertIn("media_list", response.context)
         self.assertEqual(len(response.context["media_list"]["items"]), 2)
         self.assertEqual(response.context["media_list"]["total"], 16)
+
+
+def _anchor(html, href):
+    """Return the class and inner HTML of the sidebar anchor for href."""
+    match = re.search(
+        rf'<a href="{re.escape(href)}"\s+class="([^"]*)">(.*?)</a>',
+        html,
+        re.DOTALL,
+    )
+    if match is None:
+        msg = f"No anchor for {href}"
+        raise AssertionError(msg)
+    return match.group(1), match.group(2)
+
+
+class RootRedirectTests(TestCase):
+    """Site root opens the dashboard; upstream Home stays at /home."""
+
+    def setUp(self):
+        """Create a user and log in."""
+        self.credentials = {"username": "test", "password": "12345"}
+        self.user = get_user_model().objects.create_user(**self.credentials)
+        self.client.login(**self.credentials)
+
+    def test_authenticated_root_redirects_to_dashboard(self):
+        """GET / is a temporary redirect to the dashboard, which renders."""
+        response = self.client.get("/")
+
+        self.assertRedirects(
+            response,
+            reverse("dashboard"),
+            status_code=302,
+            target_status_code=200,
+        )
+        self.assertEqual(response.url, "/dashboard")
+        self.assertNotIn("?", response.url)
+
+        with_query = self.client.get("/?sort=completion")
+        self.assertEqual(with_query.status_code, 302)
+        self.assertEqual(with_query.url, reverse("dashboard"))
+
+    def test_home_url_is_home_and_renders_the_home_template(self):
+        """The home URL name stays on /home and is not the media-list pattern."""
+        self.assertEqual(reverse("home"), "/home")
+        self.assertEqual(resolve("/").url_name, "root")
+        self.assertEqual(resolve("/home").url_name, "home")
+        self.assertEqual(
+            resolve(f"/{self.user.username}/{MediaTypes.MOVIE.value}").url_name,
+            "medialist",
+        )
+
+        response = self.client.get(reverse("home"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "app/home.html")
+        self.assertContains(response, f'href="{reverse("home")}?sort=')
+
+    def test_dashboard_renders(self):
+        """GET /dashboard returns the dashboard page."""
+        response = self.client.get(reverse("dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "app/dashboard.html")
+
+    def test_anonymous_root_ends_at_login_then_dashboard(self):
+        """A logged-out GET / reaches login, and signing in opens the dashboard."""
+        self.client.logout()
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("dashboard"))
+
+        followed = self.client.get("/", follow=True)
+
+        self.assertEqual(followed.status_code, 200)
+        self.assertEqual(followed.resolver_match.url_name, "account_login")
+        self.assertTrue(followed.redirect_chain)
+        self.assertEqual(followed.redirect_chain[0][1], 302)
+        next_url = parse_qs(urlparse(followed.redirect_chain[-1][0]).query)["next"][0]
+
+        logged_in = self.client.post(
+            reverse("account_login"),
+            {
+                "login": self.credentials["username"],
+                "password": self.credentials["password"],
+                "next": next_url,
+            },
+            follow=True,
+        )
+
+        self.assertEqual(logged_in.status_code, 200)
+        self.assertEqual(logged_in.request["PATH_INFO"], reverse("dashboard"))
+
+    def test_home_sidebar_is_active_only_on_home(self):
+        """The Home item is active on /home and inactive on /dashboard."""
+        home = self.client.get(reverse("home"))
+        dashboard = self.client.get(reverse("dashboard"))
+        home_html = home.content.decode()
+        dashboard_html = dashboard.content.decode()
+
+        home_class, home_inner = _anchor(home_html, reverse("home"))
+        self.assertIn("bg-[#2c3136]", home_class)
+        self.assertIn("text-indigo-400", home_inner)
+
+        inactive_class, inactive_inner = _anchor(dashboard_html, reverse("home"))
+        self.assertNotIn("bg-[#2c3136]", inactive_class)
+        self.assertNotIn("text-indigo-400", inactive_inner)
+
+        dashboard_class, dashboard_inner = _anchor(dashboard_html, reverse("dashboard"))
+        self.assertIn("bg-[#2c3136]", dashboard_class)
+        self.assertIn("text-indigo-400", dashboard_inner)
+
+    def test_manifest_starts_at_dashboard_and_keeps_its_id(self):
+        """The installed app identity stays /, and launch goes to the dashboard."""
+        manifest_path = (
+            Path(settings.BASE_DIR) / "static" / "favicon" / "site.webmanifest"
+        )
+        manifest = json.loads(manifest_path.read_text())
+
+        self.assertEqual(manifest["start_url"], "/dashboard")
+        self.assertEqual(manifest["id"], "/")
+        self.assertEqual(manifest["scope"], "/")
+        home_shortcut = next(
+            shortcut for shortcut in manifest["shortcuts"] if shortcut["name"] == "Home"
+        )
+        self.assertEqual(home_shortcut["url"], "/home")
+        for shortcut in manifest["shortcuts"]:
+            resolve(shortcut["url"])

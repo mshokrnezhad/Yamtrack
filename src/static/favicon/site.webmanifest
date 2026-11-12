@@ -2,7 +2,7 @@
     "name": "Yamtrack - Media Tracker",
     "short_name": "Yamtrack",
     "description": "Track your movies, TV shows, anime, manga, games and books",
-    "start_url": "/",
+    "start_url": "/dashboard",
     "id": "/",
     "display": "standalone",
     "display_override": [
@@ -63,7 +63,7 @@
             "name": "Home",
             "short_name": "Home",
             "description": "Home",
-            "url": "/",
+            "url": "/home",
             "icons": [
                 {
                     "src": "/static/img/shortcuts/home.svg",
