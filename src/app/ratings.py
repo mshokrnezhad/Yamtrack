@@ -30,6 +30,7 @@ WEIGHT_MAX = 10
 NORMALIZED_MAX = Decimal(100)
 ONE_PLACE = Decimal("0.1")
 RATINGS_MAX_AGE = timedelta(days=7)
+OMDB_FAILURE_LIMIT = 5
 RATED_MEDIA_TYPES = (
     MediaTypes.MOVIE.value,
     MediaTypes.TV.value,
@@ -316,12 +317,13 @@ def schedule_refresh(item):
 def refresh_stale_ratings(*, batch_size=100):
     """Refresh ratable items whose external ratings are missing or older than 7 days.
 
-    Returns ``(updated, deferred)``. Deferred items were skipped because the
-    OMDb daily cap was reached.
+    Returns ``(updated, deferred)``. Deferred items were skipped because OMDb
+    calls are paused for this run.
     """
     updated = 0
     deferred = 0
     allow_omdb = True
+    omdb_failures = 0
     for item in _iter_stale_items(batch_size):
         try:
             result = refresh_item_rating(item, allow_omdb=allow_omdb)
@@ -331,6 +333,18 @@ def refresh_stale_ratings(*, batch_size=100):
             continue
         if result == "deferred":
             deferred += 1
+        elif result == "omdb_failed":
+            omdb_failures += 1
+            if allow_omdb and omdb_failures >= OMDB_FAILURE_LIMIT:
+                allow_omdb = False
+                logger.warning(
+                    "Pausing OMDb for the rest of this run after %s"
+                    " consecutive failures",
+                    OMDB_FAILURE_LIMIT,
+                )
+        elif result == "omdb_updated":
+            omdb_failures = 0
+            updated += 1
         elif result == "updated":
             updated += 1
     return updated, deferred
@@ -360,7 +374,11 @@ def fill_tmdb_votes_from_cache(*, batch_size=100):
 
 
 def refresh_item_rating(item, *, allow_omdb=True):
-    """Fetch TMDB and OMDb scores for one item. Letterboxd is left unchanged."""
+    """Fetch TMDB and OMDb scores for one item. Letterboxd is left unchanged.
+
+    ``omdb_failed`` means OMDb itself failed. ``failed`` is a metadata failure.
+    ``omdb_updated`` means an OMDb response was stored.
+    """
     if not is_ratable(item):
         return "skipped"
 
@@ -370,6 +388,7 @@ def refresh_item_rating(item, *, allow_omdb=True):
 
     imdb_id = _imdb_id(metadata)
     omdb_scores = None
+    omdb_fetched = False
     if imdb_id and settings.OMDB_API_KEY:
         if not allow_omdb and not _omdb_cached(imdb_id):
             return "deferred"
@@ -377,7 +396,8 @@ def refresh_item_rating(item, *, allow_omdb=True):
             omdb_scores = omdb.fetch_ratings(imdb_id)
         except omdb.OmdbRequestError:
             logger.exception("OMDb failed for item %s", item.pk)
-            return "failed"
+            return "omdb_failed"
+        omdb_fetched = True
 
     rating, _created = ItemRating.objects.get_or_create(item=item)
     _apply_tmdb(rating, metadata)
@@ -398,6 +418,8 @@ def refresh_item_rating(item, *, allow_omdb=True):
             "ratings_updated_at",
         ],
     )
+    if omdb_fetched:
+        return "omdb_updated"
     return "updated"
 
 

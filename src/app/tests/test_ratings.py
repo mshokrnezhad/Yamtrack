@@ -1,6 +1,8 @@
+import json
 from decimal import Decimal
 from unittest.mock import patch
 
+import requests
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.management import call_command
@@ -22,6 +24,7 @@ from app.ratings import (
     format_public_value,
     normalize,
     refresh_item_rating,
+    refresh_stale_ratings,
     user_weights,
     weighted_average,
 )
@@ -421,6 +424,65 @@ class RefreshRatingTests(TestCase):
         self.assertIsNone(missed.public_rating.tmdb_votes)
         mock_metadata.assert_not_called()
 
+    @override_settings(OMDB_API_KEY="test-key", OMDB_DAILY_LIMIT=900)
+    @patch("app.providers.services.api_request")
+    @patch("app.providers.services.get_media_metadata")
+    def test_five_consecutive_omdb_failures_stop_further_requests(
+        self,
+        mock_metadata,
+        mock_request,
+    ):
+        """After five OMDb failures the rest of the run does not call OMDb."""
+        mock_metadata.side_effect = _imdb_metadata
+        mock_request.side_effect = _omdb_http_error(500, b"nope")
+        for offset in range(7):
+            self._movie(str(500 + offset))
+
+        updated, deferred = refresh_stale_ratings()
+
+        self.assertEqual(mock_request.call_count, 5)
+        self.assertEqual(updated, 0)
+        self.assertEqual(deferred, 2)
+
+    @override_settings(OMDB_API_KEY="test-key", OMDB_DAILY_LIMIT=900)
+    @patch("app.providers.services.api_request")
+    @patch("app.providers.services.get_media_metadata")
+    def test_omdb_success_resets_the_consecutive_failure_count(
+        self,
+        mock_metadata,
+        mock_request,
+    ):
+        """One successful OMDb response clears the consecutive failure count."""
+        mock_metadata.side_effect = _imdb_metadata
+        mock_request.side_effect = _fail_except_call(5)
+        for offset in range(12):
+            self._movie(str(600 + offset))
+
+        updated, deferred = refresh_stale_ratings()
+
+        self.assertEqual(mock_request.call_count, 10)
+        self.assertEqual(updated, 1)
+        self.assertEqual(deferred, 2)
+
+    @override_settings(OMDB_API_KEY="test-key", OMDB_DAILY_LIMIT=900)
+    @patch("app.providers.services.api_request")
+    @patch("app.providers.services.get_media_metadata")
+    def test_omdb_auth_error_stops_omdb_calls(self, mock_metadata, mock_request):
+        """An invalid key stops OMDb for the run, the same way the budget does."""
+        mock_metadata.side_effect = _imdb_metadata
+        mock_request.side_effect = _omdb_http_error(
+            401,
+            {"Response": "False", "Error": "Invalid API key!"},
+        )
+        for offset in range(3):
+            self._movie(str(700 + offset))
+
+        updated, deferred = refresh_stale_ratings()
+
+        self.assertEqual(mock_request.call_count, 1)
+        self.assertEqual(updated, 0)
+        self.assertEqual(deferred, 3)
+
     def _movie(self, media_id):
         return Item.objects.create(
             media_id=media_id,
@@ -429,6 +491,47 @@ class RefreshRatingTests(TestCase):
             title=f"Movie {media_id}",
             image="http://example.com/a.jpg",
         )
+
+
+def _imdb_metadata(_media_type, media_id, _source):
+    """Return TMDB metadata that points at a distinct IMDb id."""
+    return {
+        "score": 7.5,
+        "score_count": 20,
+        "external_links": {"IMDb": f"https://www.imdb.com/title/tt{media_id}/"},
+    }
+
+
+def _omdb_http_error(status, body):
+    """Build an OMDb HTTPError. The URL includes a key that must not be logged."""
+    response = requests.Response()
+    response.status_code = status
+    response.url = "https://www.omdbapi.com/?apikey=test-key&i=tt0000001"
+    if isinstance(body, bytes):
+        response._content = body
+    else:
+        response._content = json.dumps(body).encode()
+    response.encoding = "utf-8"
+    return requests.HTTPError(f"{status} for url: {response.url}", response=response)
+
+
+def _fail_except_call(success_on):
+    """Fail every OMDb call except ``success_on`` (1-based)."""
+
+    def _request(*_args, **_kwargs):
+        _request.calls += 1
+        if _request.calls == success_on:
+            return {
+                "Response": "True",
+                "imdbRating": "8.0",
+                "imdbVotes": "12,000",
+                "Metascore": "80",
+                "Ratings": [{"Source": "Rotten Tomatoes", "Value": "90%"}],
+            }
+        raise _omdb_http_error(500, b"nope")
+
+    _request.calls = 0
+    return _request
 
 
 class LetterboxdViewTests(TestCase):

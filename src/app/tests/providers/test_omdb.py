@@ -1,10 +1,17 @@
+import json
 from decimal import Decimal
 from unittest.mock import patch
 
+import requests
 from django.core.cache import cache
 from django.test import SimpleTestCase, override_settings
 
-from app.providers.omdb import OmdbBudgetError, fetch_ratings
+from app.providers.omdb import (
+    OmdbAuthError,
+    OmdbBudgetError,
+    OmdbRequestError,
+    fetch_ratings,
+)
 
 OMDB_HIT = {
     "Response": "True",
@@ -96,3 +103,72 @@ class OmdbClientTests(SimpleTestCase):
             fetch_ratings("tt0000002")
 
         mock_request.assert_called_once()
+
+    @override_settings(OMDB_API_KEY="secret-omdb-key", OMDB_DAILY_LIMIT=900)
+    @patch("app.providers.omdb.services.api_request")
+    def test_http_401_limit_is_a_budget_error(self, mock_request):
+        """A 401 whose body says the limit was reached stops the budget."""
+        mock_request.side_effect = _http_error(
+            401,
+            {"Response": "False", "Error": "Request limit reached!"},
+        )
+
+        with (
+            self.assertNoLogs("app.providers.omdb", level="WARNING"),
+            self.assertRaises(OmdbBudgetError) as caught,
+        ):
+            fetch_ratings("tt0133093")
+
+        self.assertNotIsInstance(caught.exception, OmdbAuthError)
+        self.assertNotIn("secret-omdb-key", str(caught.exception))
+
+    @override_settings(OMDB_API_KEY="secret-omdb-key", OMDB_DAILY_LIMIT=900)
+    @patch("app.providers.omdb.services.api_request")
+    def test_http_401_invalid_key_is_an_auth_error(self, mock_request):
+        """A 401 for an invalid key is an auth error and the key is not logged."""
+        mock_request.side_effect = _http_error(
+            401,
+            {"Response": "False", "Error": "Invalid API key!"},
+        )
+
+        with (
+            self.assertLogs("app.providers.omdb", level="WARNING") as logs,
+            self.assertRaises(OmdbAuthError),
+        ):
+            fetch_ratings("tt0133093")
+
+        logged = "\n".join(logs.output)
+        self.assertNotIn("secret-omdb-key", logged)
+        self.assertNotIn("apikey", logged.lower())
+        self.assertNotIn("omdbapi.com", logged)
+
+    @override_settings(OMDB_API_KEY="secret-omdb-key", OMDB_DAILY_LIMIT=900)
+    @patch("app.providers.omdb.services.api_request")
+    def test_http_500_non_json_stays_a_request_error(self, mock_request):
+        """A 500 with a non-JSON body stays retryable and does not log the key."""
+        mock_request.side_effect = _http_error(500, b"<html>unavailable</html>")
+
+        with (
+            self.assertLogs("app.providers.omdb", level="WARNING") as logs,
+            self.assertRaises(OmdbRequestError) as caught,
+        ):
+            fetch_ratings("tt0133093")
+
+        self.assertNotIsInstance(caught.exception, OmdbBudgetError)
+        logged = "\n".join(logs.output)
+        self.assertNotIn("secret-omdb-key", logged)
+        self.assertNotIn("apikey", logged.lower())
+
+
+def _http_error(status, body):
+    """Build an HTTPError whose response body is JSON or raw bytes."""
+    response = requests.Response()
+    response.status_code = status
+    response.url = "https://www.omdbapi.com/?apikey=secret-omdb-key&i=tt0133093"
+    if isinstance(body, bytes):
+        response._content = body
+    else:
+        response._content = json.dumps(body).encode()
+    response.encoding = "utf-8"
+    message = f"{status} Client Error for url: {response.url}"
+    return requests.HTTPError(message, response=response)

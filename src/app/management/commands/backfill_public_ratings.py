@@ -32,5 +32,5 @@ class Command(BaseCommand):
             )
         if deferred:
             self.stdout.write(
-                f"Deferred {deferred} items because the OMDb daily limit was reached.",
+                f"Deferred {deferred} items until the next OMDb run.",
             )

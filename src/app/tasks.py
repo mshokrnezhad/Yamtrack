@@ -59,6 +59,8 @@ def refresh_item_public_rating(item_id):
         return None
     try:
         return refresh_item_rating(item)
+    except omdb.OmdbAuthError:
+        return None
     except omdb.OmdbBudgetError:
         logger.info("OMDb daily limit reached, skipping item %s.", item_id)
         return None

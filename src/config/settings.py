@@ -605,9 +605,11 @@ USER_MESSAGE_RETENTION_DAYS = config(
     cast=int,
 )
 CELERY_BEAT_SCHEDULE = {
+    # Crontabs are fixed local times (TIME_ZONE). An interval would restart
+    # whenever the beat container is recreated.
     "reload_calendar": {
         "task": "Reload calendar",
-        "schedule": 60 * 60 * 24,  # every 24 hours
+        "schedule": crontab(hour=3, minute=0),
     },
     "send_release_notifications": {
         "task": "Send release notifications",
@@ -619,11 +621,11 @@ CELERY_BEAT_SCHEDULE = {
     },
     "cleanup_user_messages": {
         "task": "Cleanup user messages",
-        "schedule": 60 * 60 * 24,  # every 24 hours
+        "schedule": crontab(hour=4, minute=15),
     },
     "refresh_public_ratings": {
         "task": "Refresh public ratings",
-        "schedule": 60 * 60 * 24,  # every 24 hours
+        "schedule": crontab(hour=0, minute=30),
     },
 }
 

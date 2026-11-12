@@ -19,6 +19,10 @@ class OmdbBudgetError(Exception):
     """Raised when today's OMDb request budget is already spent."""
 
 
+class OmdbAuthError(OmdbBudgetError):
+    """Raised when OMDb rejects the API key. Callers stop OMDb for the run."""
+
+
 class OmdbRequestError(Exception):
     """Raised when OMDb responds with an error that should be retried later."""
 
@@ -47,6 +51,10 @@ def fetch_ratings(imdb_id):
             OMDB_URL,
             params={"apikey": settings.OMDB_API_KEY, "i": imdb_id},
         )
+    except requests.HTTPError as error:
+        # OMDb answers both "Request limit reached!" and "Invalid API key!"
+        # with HTTP 401. The reason is only in the JSON body.
+        _raise_for_http_error(error, imdb_id)
     except requests.RequestException as error:
         logger.exception("OMDb request failed for %s", imdb_id)
         raise OmdbRequestError from error
@@ -54,6 +62,34 @@ def fetch_ratings(imdb_id):
     parsed = _parse_payload(payload, imdb_id)
     cache.set(cache_key, parsed, timeout=OMDB_CACHE_SECONDS)
     return parsed
+
+
+def _raise_for_http_error(error, imdb_id):
+    """Turn an OMDb HTTP error into a budget, auth, or retryable error.
+
+    The exception text and request URL are dropped. Both can contain the key.
+    """
+    text = _response_error_text(error.response).lower()
+    if "limit" in text:
+        raise OmdbBudgetError from None
+    if "invalid api key" in text:
+        logger.warning("OMDb rejected the API key for %s", imdb_id)
+        raise OmdbAuthError from None
+    logger.warning("OMDb request failed for %s", imdb_id)
+    raise OmdbRequestError from None
+
+
+def _response_error_text(response):
+    """Return OMDb's Error string, or empty when the body is not that JSON."""
+    if response is None:
+        return ""
+    try:
+        payload = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("Error") or "")
 
 
 def _consume_budget():

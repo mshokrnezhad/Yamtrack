@@ -67,6 +67,8 @@ The public score is a weighted average of IMDb, Rotten Tomatoes, Metacritic, TMD
 
 `manage.py backfill_public_ratings` fills those scores for movies, TV, and anime already in the library. It runs in batches and stops calling OMDb once `OMDB_DAILY_LIMIT` is reached.
 
+An OMDb HTTP 401 for a reached request limit or an invalid API key stops further OMDb calls for that run. Five consecutive OMDb failures pause OMDb for the rest of the run. Cached scores are still used. Nightly jobs run at local time: public ratings at 00:30, calendar reload at 03:00, and message cleanup at 04:15.
+
 ## 📱 Screenshots
 
 | Homepage                                                                                       | Calendar                                                                                    |
