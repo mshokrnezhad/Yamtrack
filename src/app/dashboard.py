@@ -8,6 +8,7 @@ from django.db.models import (
     OuterRef,
     Prefetch,
     Q,
+    Subquery,
     Window,
     prefetch_related_objects,
 )
@@ -37,6 +38,7 @@ _ROWS = {
     "top-downloaded-tv": ("downloaded", MediaTypes.TV.value),
     "top-planning-tv": ("planning", MediaTypes.TV.value),
     "continue-watching": ("continue", MediaTypes.TV.value),
+    "new-episodes": ("new", MediaTypes.TV.value),
 }
 
 
@@ -62,6 +64,7 @@ def _title(key):
         "top-downloaded-tv": _("Top Downloaded TV"),
         "top-planning-tv": _("Top Planning TV"),
         "continue-watching": _("Continue watching"),
+        "new-episodes": _("New episodes"),
     }
     return titles[key]
 
@@ -76,7 +79,7 @@ def _key(kind, media_type):
 
 
 def build_rows(user):
-    """Return the dashboard rows that have something to show."""
+    """Return the dashboard rows, always including the episode rows."""
     downloaded = _downloaded_list(user)
     rows = [
         _list_row(
@@ -91,6 +94,7 @@ def build_rows(user):
     ]
     rows = [row for row in rows if row["media"]]
     rows.append(_continue_row(user))
+    rows.append(_new_episodes_row(user))
     return rows
 
 
@@ -121,6 +125,8 @@ def _ordered(user, key, *, downloaded=_UNSET):
         return _downloaded_items(user, downloaded, media_type)
     if kind == "planning":
         return _planning_entries(user, media_type)
+    if kind == "new":
+        return _new_episode_shows(user)
     return _continue_shows(user)
 
 
@@ -219,7 +225,7 @@ def _cards(user, key, records):
         return _attach_tracking(user, media_type, records)
     if kind == "planning" and media_type == MediaTypes.TV.value:
         _prefetch_episodes(records)
-    elif kind == "continue":
+    elif kind in {"continue", "new"}:
         _label_continue(records)
     return records
 
@@ -298,12 +304,11 @@ def _tmdb_status(show):
     return (metadata.get("details") or {}).get("status") or ""
 
 
-def _continue_row(user):
-    """In-progress shows with an aired episode still to watch, newest watch first."""
-    key = "continue-watching"
+def _episode_row(user, key):
+    """One capped TV row. Continue watching and New episodes share this shape."""
     shows = list(_ordered(user, key)[:ROW_LIMIT])
     return {
-        "key": "continue",
+        "key": _ROWS[key][0],
         "title": _title(key),
         "see_all": reverse("dashboard_row", args=[key]),
         "media_type": MediaTypes.TV.value,
@@ -311,9 +316,19 @@ def _continue_row(user):
     }
 
 
-def _continue_shows(user):
-    """Return in-progress shows with an aired episode left, newest watch first."""
-    queryset = (
+def _continue_row(user):
+    """In-progress shows with an aired episode still to watch, newest watch first."""
+    return _episode_row(user, "continue-watching")
+
+
+def _new_episodes_row(user):
+    """In-progress shows with an aired episode still to watch, newest air date first."""
+    return _episode_row(user, "new-episodes")
+
+
+def _in_progress_unwatched(user):
+    """In-progress shows with an aired episode still to watch."""
+    return (
         TV.objects.filter(user=user, status=Status.IN_PROGRESS.value)
         .filter(Exists(_unwatched_aired()))
         .select_related("item")
@@ -324,7 +339,25 @@ def _continue_shows(user):
             ),
         )
     )
+
+
+def _continue_shows(user):
+    """Return in-progress shows with an aired episode left, newest watch first."""
+    return annotate_public_rating(_in_progress_unwatched(user), user).order_by(
+        F("last_watched_at").desc(nulls_last=True),
+        Lower("item__title"),
+    )
+
+
+def _new_episode_shows(user):
+    """Return those shows, most recently aired episode first."""
+    queryset = _in_progress_unwatched(user).annotate(
+        latest_aired_at=Subquery(
+            _aired_events().order_by("-datetime").values("datetime")[:1],
+        ),
+    )
     return annotate_public_rating(queryset, user).order_by(
+        F("latest_aired_at").desc(nulls_last=True),
         F("last_watched_at").desc(nulls_last=True),
         Lower("item__title"),
     )

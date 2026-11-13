@@ -44,7 +44,7 @@ You can try the app at [yamtrack.fuzzygrim.com](https://yamtrack.fuzzygrim.com) 
 
 `/` redirects to `/dashboard`. The upstream Home view lives at `/home`.
 
-This fork opens on a personal dashboard with five rows. Each row shows 10 titles. **See all** opens the same titles in the same order, without that cap, as a responsive grid of the same cards. Long lists load further pages as you scroll.
+This fork opens on a personal dashboard with six rows. Each row shows 10 titles. **See all** opens the same titles in the same order, without that cap, as a responsive grid of the same cards. Long lists load further pages as you scroll.
 
 | Row | Route | What it lists |
 | --- | --- | --- |
@@ -53,8 +53,9 @@ This fork opens on a personal dashboard with five rows. Each row shows 10 titles
 | Top Downloaded TV | `/dashboard/top-downloaded-tv` | TV shows in your Downloaded list, highest public score first |
 | Top Planning TV | `/dashboard/top-planning-tv` | TV shows you marked Planning, highest public score first |
 | Continue watching | `/dashboard/continue-watching` | In progress shows that still have an aired episode you have not watched (specials excluded), most recently watched first |
+| New episodes | `/dashboard/new-episodes` | In progress shows that still have an aired episode you have not watched (specials excluded), most recently aired episode first |
 
-Continue watching cards show the next episode (for example `S1E2`) and how many aired episodes are left. Downloaded and Planning cards show the public score.
+Continue watching and New episodes cards show the next episode (for example `S1E2`) and how many aired episodes are left. Downloaded and Planning cards show the public score.
 
 **Refresh** reloads your calendar, then marks a show completed when it has ended or been canceled and every aired episode is watched.
 

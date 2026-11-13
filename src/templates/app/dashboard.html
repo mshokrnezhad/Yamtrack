@@ -38,8 +38,14 @@
               </div>
             {% endfor %}
           </div>
-        {% elif row.key == "continue" %}
-          <p class="text-sm text-gray-400">{% trans "No shows in progress." %}</p>
+        {% elif row.key == "continue" or row.key == "new" %}
+          <p class="text-sm text-gray-400">
+            {% if row.key == "continue" %}
+              {% trans "No shows in progress." %}
+            {% else %}
+              {% trans "No new episodes." %}
+            {% endif %}
+          </p>
         {% endif %}
       </section>
     {% empty %}

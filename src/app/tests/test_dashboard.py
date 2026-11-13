@@ -13,6 +13,7 @@ from app.dashboard import (
     ROW_LIMIT,
     _continue_row,
     _list_row,
+    _new_episodes_row,
     _planning_row,
     build_rows,
     complete_finished_shows,
@@ -390,17 +391,238 @@ class DashboardRowTests(TestCase):
         with self.assertNumQueries(3):
             _continue_row(self.user)
 
+    def test_new_episodes_order_by_latest_air_date_not_last_watch(self):
+        """A newer aired episode outranks a more recent watch. Continue does not."""
+        now = timezone.now()
+        older_air = self._tv("a", "Older air", Status.IN_PROGRESS.value)
+        older_season = self._season(older_air, 1)
+        self._air(older_season, 1, now - timedelta(days=40))
+        self._watch(older_season, 1, now - timedelta(days=1))
+        self._air(older_season, 2, now - timedelta(days=30))
+
+        newer_air = self._tv("b", "Newer air", Status.IN_PROGRESS.value)
+        newer_season = self._season(newer_air, 1)
+        self._air(newer_season, 1, now - timedelta(days=50))
+        self._watch(newer_season, 1, now - timedelta(days=20))
+        self._air(newer_season, 2, now - timedelta(days=2))
+
+        row = _new_episodes_row(self.user)
+
+        self.assertEqual(self._titles(row), ["Newer air", "Older air"])
+        self.assertGreater(
+            row["media"][0].latest_aired_at,
+            row["media"][1].latest_aired_at,
+        )
+        self.assertEqual(
+            self._titles(_continue_row(self.user)),
+            ["Older air", "Newer air"],
+        )
+
+    def test_new_episodes_break_air_date_ties_by_last_watch_then_title(self):
+        """The same air date falls back to last watch, then title. Nulls go last."""
+        now = timezone.now()
+        aired = now - timedelta(days=4)
+        recent = self._tv("1", "Recent watch", Status.IN_PROGRESS.value)
+        recent_season = self._season(recent, 1)
+        self._air(recent_season, 1, aired - timedelta(days=2))
+        self._watch(recent_season, 1, now - timedelta(days=1))
+        self._air(recent_season, 2, aired)
+        earlier = self._tv("2", "Earlier watch", Status.IN_PROGRESS.value)
+        earlier_season = self._season(earlier, 1)
+        self._air(earlier_season, 1, aired - timedelta(days=3))
+        self._watch(earlier_season, 1, now - timedelta(days=10))
+        self._air(earlier_season, 2, aired)
+        self._air(
+            self._season(self._tv("3", "Zebra", Status.IN_PROGRESS.value), 1),
+            1,
+            aired,
+        )
+        self._air(
+            self._season(self._tv("4", "Alpha", Status.IN_PROGRESS.value), 1),
+            1,
+            aired,
+        )
+
+        self.assertEqual(
+            self._titles(_new_episodes_row(self.user)),
+            ["Recent watch", "Earlier watch", "Alpha", "Zebra"],
+        )
+
+    def test_specials_do_not_qualify_or_affect_new_episodes(self):
+        """Season 0 alone does not qualify a show or change its order or label."""
+        now = timezone.now()
+        specials_only = self._tv("s0", "Specials Only", Status.IN_PROGRESS.value)
+        self._air(self._season(specials_only, 0), 1, now - timedelta(hours=1))
+        older = self._tv("old", "Older Regular", Status.IN_PROGRESS.value)
+        self._air(self._season(older, 1), 1, now - timedelta(days=5))
+        real = self._tv("real", "With Special", Status.IN_PROGRESS.value)
+        self._air(self._season(real, 1), 1, now - timedelta(days=10))
+        self._air(self._season(real, 0), 1, now - timedelta(hours=1))
+
+        row = _new_episodes_row(self.user)
+
+        self.assertEqual(self._titles(row), ["Older Regular", "With Special"])
+        self.assertEqual(row["media"][1].next_episode, "S1E1")
+        self.assertEqual(row["media"][1].episodes_remaining, 1)
+
+    def test_new_episodes_skip_caught_up_shows(self):
+        """A show with every aired episode watched is left out."""
+        now = timezone.now()
+        self._show_with_episode("done", "Caught Up", now)
+        kept = self._tv("kept", "Kept", Status.IN_PROGRESS.value)
+        self._air(self._season(kept, 1), 1, now - timedelta(days=2))
+
+        self.assertEqual(self._titles(_new_episodes_row(self.user)), ["Kept"])
+
+    def test_new_episodes_skip_shows_that_are_not_in_progress(self):
+        """Planning, paused, dropped, and completed shows stay off the row."""
+        now = timezone.now()
+        for status in (
+            Status.COMPLETED.value,
+            Status.PLANNING.value,
+            Status.PAUSED.value,
+            Status.DROPPED.value,
+        ):
+            show = self._tv(status, status, status)
+            # A planning season does not pull the show back to In progress.
+            self._air(
+                self._season(show, 1, Status.PLANNING.value),
+                1,
+                now - timedelta(days=1),
+            )
+        kept = self._tv("kept", "Kept", Status.IN_PROGRESS.value)
+        self._air(self._season(kept, 1), 1, now - timedelta(days=2))
+
+        self.assertEqual(self._titles(_new_episodes_row(self.user)), ["Kept"])
+
+    def test_future_events_do_not_select_or_order_new_episodes(self):
+        """An unaired episode does not qualify a show or move it up the row."""
+        now = timezone.now()
+        future = self._tv("fut", "Future", Status.IN_PROGRESS.value)
+        self._air(self._season(future, 1), 1, now + timedelta(days=3))
+        recent = self._tv("rec", "Recent", Status.IN_PROGRESS.value)
+        self._air(self._season(recent, 1), 1, now - timedelta(days=1))
+        mixed = self._tv("mix", "Mixed", Status.IN_PROGRESS.value)
+        season = self._season(mixed, 1)
+        self._air(season, 1, now - timedelta(days=10))
+        self._air(season, 2, now + timedelta(days=2))
+
+        row = _new_episodes_row(self.user)
+
+        self.assertEqual(self._titles(row), ["Recent", "Mixed"])
+        self.assertEqual(row["media"][1].next_episode, "S1E1")
+        self.assertEqual(row["media"][1].episodes_remaining, 1)
+        self.assertEqual(row["media"][1].latest_aired_at, now - timedelta(days=10))
+
+    def test_new_episode_cards_label_the_next_unwatched_aired_episode(self):
+        """The card names the next aired episode, even from an unstored season."""
+        now = timezone.now()
+        show = self._tv("lbl", "Labeled", Status.IN_PROGRESS.value)
+        season = self._season(show, 1)
+        self._air(season, 1, now - timedelta(days=20))
+        self._watch(season, 1, now - timedelta(days=19))
+        later = Item.objects.create(
+            media_id=show.item.media_id,
+            source=show.item.source,
+            media_type=MediaTypes.SEASON.value,
+            title=show.item.title,
+            image=show.item.image,
+            season_number=3,
+        )
+        latest = now - timedelta(days=1)
+        Event.objects.create(
+            item=later,
+            content_number=1,
+            datetime=now - timedelta(days=2),
+        )
+        Event.objects.create(item=later, content_number=2, datetime=latest)
+        Event.objects.create(
+            item=later,
+            content_number=3,
+            datetime=now + timedelta(days=5),
+        )
+
+        row = _new_episodes_row(self.user)
+
+        self.assertEqual(self._titles(row), ["Labeled"])
+        self.assertEqual(row["media"][0].next_episode, "S3E1")
+        self.assertEqual(row["media"][0].episodes_remaining, 2)
+        self.assertEqual(row["media"][0].latest_aired_at, latest)
+        self.assertEqual(
+            row["see_all"],
+            reverse("dashboard_row", args=["new-episodes"]),
+        )
+
+        self.client.login(username="dash", password="test-pass")  # noqa: S106
+        page = self.client.get(reverse("dashboard_row", args=["new-episodes"]))
+        dashboard = self.client.get(reverse("dashboard"))
+
+        self.assertContains(page, "S3E1")
+        self.assertContains(page, "2 left")
+        self.assertContains(dashboard, "S3E1")
+        self.assertContains(dashboard, "2 left")
+
+    def test_new_episodes_see_all_matches_the_row(self):
+        """See all keeps the row order and drops the ten-item cap."""
+        self.client.login(username="dash", password="test-pass")  # noqa: S106
+        now = timezone.now()
+        total = ROW_LIMIT + 2
+        for number in range(total):
+            show = self._tv(
+                f"ne{number}",
+                f"Aired {number:02d}",
+                Status.IN_PROGRESS.value,
+            )
+            self._air(self._season(show, 1), 1, now - timedelta(days=number))
+
+        row = _new_episodes_row(self.user)
+        page = self.client.get(reverse("dashboard_row", args=["new-episodes"]))
+        shown = page.context["entries"]
+        dashboard = self.client.get(reverse("dashboard"))
+        expected = [f"Aired {number:02d}" for number in range(total)]
+
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(self._titles(row), expected[:ROW_LIMIT])
+        self.assertEqual([entry.item.title for entry in shown], expected)
+        self.assertEqual(
+            [entry.item.id for entry in shown[:ROW_LIMIT]],
+            [entry.item.id for entry in row["media"]],
+        )
+        self.assertEqual(
+            [entry.next_episode for entry in shown[:ROW_LIMIT]],
+            [entry.next_episode for entry in row["media"]],
+        )
+        self.assertEqual(
+            [entry.episodes_remaining for entry in shown[:ROW_LIMIT]],
+            [entry.episodes_remaining for entry in row["media"]],
+        )
+        self.assertEqual(shown[0].next_episode, "S1E1")
+        self.assertEqual(shown[0].episodes_remaining, 1)
+        self.assertContains(page, "Aired 00")
+        self.assertContains(page, expected[-1])
+        self.assertNotContains(dashboard, expected[ROW_LIMIT])
+
+    def test_new_episodes_loads_in_bulk(self):
+        """New episodes loads aired and watched episodes in bulk."""
+        self._half_watched("ne", "Ready", timezone.now())
+
+        with self.assertNumQueries(3):
+            _new_episodes_row(self.user)
+
     def test_empty_rows_are_left_out(self):
-        """A row with nothing in it is not returned."""
+        """A list row with nothing in it is omitted. Episode rows stay, in order."""
         item = self._movie_item("400", "Only")
         Movie.objects.create(item=item, user=self.user, status=Status.PLANNING.value)
 
         rows = build_rows(self.user)
+        titles = [row["title"] for row in rows]
 
         self.assertEqual(
-            [row["title"] for row in rows],
-            ["Top Planning movies", "Continue watching"],
+            titles,
+            ["Top Planning movies", "Continue watching", "New episodes"],
         )
+        self.assertEqual(titles[titles.index("Continue watching") + 1], "New episodes")
+        self.assertEqual(rows[-2]["media"], [])
         self.assertEqual(rows[-1]["media"], [])
 
     def test_see_all_page_matches_each_dashboard_row(self):
@@ -445,6 +667,7 @@ class DashboardRowTests(TestCase):
                     "top-downloaded-tv": downloaded_show.item,
                     "top-planning-tv": planned_show.item,
                     "continue-watching": show.item,
+                    "new-episodes": show.item,
                 }
 
         dashboard = self.client.get(reverse("dashboard"))
@@ -469,7 +692,7 @@ class DashboardRowTests(TestCase):
                 self.assertContains(dashboard, f'href="{url}"')
                 self.assertContains(page, eleventh.title)
                 self.assertNotContains(dashboard, eleventh.title)
-                if key == "continue-watching":
+                if key in {"continue-watching", "new-episodes"}:
                     self.assertEqual(
                         [entry.next_episode for entry in shown[:ROW_LIMIT]],
                         [entry.next_episode for entry in row_media],
@@ -549,7 +772,7 @@ class DashboardRowTests(TestCase):
         )
         return TV.objects.create(item=item, user=self.user, status=status)
 
-    def _season(self, tv, number):
+    def _season(self, tv, number, status=Status.IN_PROGRESS.value):
         item = Item.objects.create(
             media_id=tv.item.media_id,
             source=tv.item.source,
@@ -562,7 +785,7 @@ class DashboardRowTests(TestCase):
             item=item,
             user=self.user,
             related_tv=tv,
-            status=Status.IN_PROGRESS.value,
+            status=status,
         )
 
     def _air(self, season, episode_number, when):
@@ -640,6 +863,16 @@ class DashboardViewTests(TestCase):
         self.assertNotContains(response, "Top Downloaded movies")
         self.assertContains(response, "Continue watching")
         self.assertContains(response, "No shows in progress.")
+        self.assertContains(response, "New episodes")
+        self.assertContains(response, "No new episodes.")
+        content = response.content.decode()
+        self.assertLess(
+            content.index(">Continue watching</h2>"),
+            content.index(">New episodes</h2>"),
+        )
+        empty = self.client.get(reverse("dashboard_row", args=["new-episodes"]))
+        self.assertContains(empty, "No new episodes.")
+        self.assertContains(empty, "New episodes")
         self.assertNotContains(response, "status=In+progress")
         self.assertNotContains(response, "Caught up")
         self.assertContains(response, "dashboard-row")
