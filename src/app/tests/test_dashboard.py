@@ -555,7 +555,7 @@ class DashboardRowTests(TestCase):
 
         self.client.login(username="dash", password="test-pass")  # noqa: S106
         page = self.client.get(reverse("dashboard_row", args=["new-episodes"]))
-        dashboard = self.client.get(reverse("dashboard"))
+        dashboard = self.client.get(reverse("dashboard_movies_tv"))
 
         self.assertContains(page, "S3E1")
         self.assertContains(page, "2 left")
@@ -578,7 +578,7 @@ class DashboardRowTests(TestCase):
         row = _new_episodes_row(self.user)
         page = self.client.get(reverse("dashboard_row", args=["new-episodes"]))
         shown = page.context["entries"]
-        dashboard = self.client.get(reverse("dashboard"))
+        dashboard = self.client.get(reverse("dashboard_movies_tv"))
         expected = [f"Aired {number:02d}" for number in range(total)]
 
         self.assertEqual(page.status_code, 200)
@@ -670,7 +670,7 @@ class DashboardRowTests(TestCase):
                     "new-episodes": show.item,
                 }
 
-        dashboard = self.client.get(reverse("dashboard"))
+        dashboard = self.client.get(reverse("dashboard_movies_tv"))
         rows = {row["see_all"]: row["media"] for row in dashboard.context["rows"]}
         for key, eleventh in extra.items():
             with self.subTest(key=key):
@@ -850,7 +850,7 @@ class DashboardViewTests(TestCase):
 
     def test_page_shows_filled_rows_and_their_see_all_links(self):
         """Filled rows render, empty rows do not, and See all opens that row."""
-        response = self.client.get(reverse("dashboard"))
+        response = self.client.get(reverse("dashboard_movies_tv"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Top Planning movies")
@@ -931,7 +931,7 @@ class DashboardViewTests(TestCase):
                 [Episode(item=episode_item, related_season=season, end_date=watched)],
             )
 
-        response = self.client.get(reverse("dashboard"))
+        response = self.client.get(reverse("dashboard_movies_tv"))
 
         self.assertContains(response, "No shows in progress.")
         self.assertNotContains(response, "Archive")
@@ -994,7 +994,7 @@ class DashboardViewTests(TestCase):
                 datetime=watched,
             )
 
-        response = self.client.get(reverse("dashboard"))
+        response = self.client.get(reverse("dashboard_movies_tv"))
 
         self.assertContains(response, "S1E2")
         self.assertContains(response, "1 left")

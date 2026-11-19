@@ -9,7 +9,7 @@
   <div class="space-y-6">
     <div class="flex items-baseline justify-between gap-4">
       <h1 class="text-3xl font-bold">{{ title }}</h1>
-      <a href="{% url 'dashboard' %}"
+      <a href="{{ back_url }}"
          class="shrink-0 text-sm text-indigo-400 hover:text-indigo-300">{% trans "Dashboard" %}</a>
     </div>
     {% if entries %}
@@ -19,14 +19,8 @@
           <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500"></div>
         </div>
       </div>
-    {% elif key == "continue-watching" or key == "new-episodes" %}
-      <p class="text-sm text-gray-400">
-        {% if key == "continue-watching" %}
-          {% trans "No shows in progress." %}
-        {% else %}
-          {% trans "No new episodes." %}
-        {% endif %}
-      </p>
+    {% elif empty %}
+      <p class="text-sm text-gray-400">{{ empty }}</p>
     {% else %}
       <p class="text-gray-400">{% trans "Nothing to show yet." %}</p>
     {% endif %}

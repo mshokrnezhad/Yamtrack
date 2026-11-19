@@ -377,6 +377,62 @@ def game(media_id):
     return data
 
 
+def critic_scores(media_ids):
+    """Return IGDB aggregated_rating for each game id.
+
+    One request covers the whole batch. Ids missing from the response, and
+    ratings IGDB left out, are None.
+    """
+    unique = []
+    seen = set()
+    for media_id in media_ids:
+        try:
+            igdb_id = int(media_id)
+        except (TypeError, ValueError):
+            continue
+        if igdb_id in seen:
+            continue
+        seen.add(igdb_id)
+        unique.append(igdb_id)
+    if not unique:
+        return {}
+
+    id_list = ",".join(str(igdb_id) for igdb_id in unique)
+    query = f"fields aggregated_rating; where id = ({id_list}); limit {len(unique)};"
+    url = f"{base_url}/games"
+    headers = {
+        "Client-ID": settings.IGDB_ID,
+        "Authorization": f"Bearer {get_access_token()}",
+    }
+    try:
+        response = services.api_request(
+            Sources.IGDB.value,
+            "POST",
+            url,
+            data=query,
+            headers=headers,
+        )
+    except requests.exceptions.HTTPError as error:
+        error_resp = handle_error(error)
+        if error_resp and error_resp.get("retry"):
+            headers["Authorization"] = f"Bearer {get_access_token()}"
+            response = services.api_request(
+                Sources.IGDB.value,
+                "POST",
+                url,
+                data=query,
+                headers=headers,
+            )
+
+    found = {}
+    for row in response or []:
+        game_id = row.get("id")
+        if game_id is None:
+            continue
+        found[int(game_id)] = row.get("aggregated_rating")
+    return {igdb_id: found.get(igdb_id) for igdb_id in unique}
+
+
 def get_image_url(response):
     """Return the image URL for the media."""
     # when no image, cover is not present in the response

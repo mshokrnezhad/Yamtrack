@@ -1,4 +1,5 @@
 import logging
+from decimal import ROUND_HALF_UP, Decimal
 
 from django.core.cache import cache
 from django.db.models import (
@@ -18,7 +19,17 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from simple_history.utils import bulk_update_with_history
 
-from app.models import TV, Episode, Item, MediaTypes, Movie, Season, Sources, Status
+from app.models import (
+    TV,
+    Episode,
+    Game,
+    Item,
+    MediaTypes,
+    Movie,
+    Season,
+    Sources,
+    Status,
+)
 from app.providers import services
 from app.ratings import annotate_public_rating
 from events.models import Event
@@ -29,9 +40,17 @@ logger = logging.getLogger(__name__)
 ROW_LIMIT = 10
 PAGE_SIZE = 32
 DOWNLOADED_LIST = "Downloaded"
+XBOX_LIST = "Xbox"
+SWITCH_LIST = "Nintendo Switch"
 REFRESH_COOLDOWN = 60
 FINISHED_TMDB_STATUSES = frozenset({"Ended", "Canceled"})
 _UNSET = object()
+_PLAYING = (Status.IN_PROGRESS.value, Status.PAUSED.value)
+_OWNED = (
+    Status.IN_PROGRESS.value,
+    Status.PAUSED.value,
+    Status.PLANNING.value,
+)
 _ROWS = {
     "top-downloaded-movies": ("downloaded", MediaTypes.MOVIE.value),
     "top-planning-movies": ("planning", MediaTypes.MOVIE.value),
@@ -39,6 +58,20 @@ _ROWS = {
     "top-planning-tv": ("planning", MediaTypes.TV.value),
     "continue-watching": ("continue", MediaTypes.TV.value),
     "new-episodes": ("new", MediaTypes.TV.value),
+}
+_GAME_ROWS = {
+    "continue-playing-xbox": ("continue", XBOX_LIST),
+    "continue-playing-switch": ("continue", SWITCH_LIST),
+    "best-owned-xbox": ("best", XBOX_LIST),
+    "best-owned-switch": ("best", SWITCH_LIST),
+}
+_EMPTY = {
+    "continue-watching": _("No shows in progress."),
+    "new-episodes": _("No new episodes."),
+    "continue-playing-xbox": _("No games in progress."),
+    "continue-playing-switch": _("No games in progress."),
+    "best-owned-xbox": _("No unfinished owned games."),
+    "best-owned-switch": _("No unfinished owned games."),
 }
 
 
@@ -65,6 +98,10 @@ def _title(key):
         "top-planning-tv": _("Top Planning TV"),
         "continue-watching": _("Continue watching"),
         "new-episodes": _("New episodes"),
+        "continue-playing-xbox": _("Continue Playing - Xbox"),
+        "continue-playing-switch": _("Continue Playing - Switch"),
+        "best-owned-xbox": _("Best Owned - Xbox"),
+        "best-owned-switch": _("Best Owned - Switch"),
     }
     return titles[key]
 
@@ -98,18 +135,31 @@ def build_rows(user):
     return rows
 
 
+def build_game_rows(user):
+    """Return the four game rows, including ones with nothing to show."""
+    lists = {
+        XBOX_LIST: _named_list(user, XBOX_LIST),
+        SWITCH_LIST: _named_list(user, SWITCH_LIST),
+    }
+    return [
+        _game_row(user, key, lists[name]) for key, (_kind, name) in _GAME_ROWS.items()
+    ]
+
+
 def row_page(user, key, page):
     """Return one page of the same ordered items as that dashboard row."""
-    if key not in _ROWS:
+    if key not in _ROWS and key not in _GAME_ROWS:
         return None
     records, has_next, number = _slice_page(_ordered(user, key), page)
     return {
         "key": key,
         "title": _title(key),
-        "media_type": _ROWS[key][1],
+        "media_type": _row_media_type(key),
         "entries": _cards(user, key, records),
         "has_next": has_next,
         "next_page": number + 1,
+        "back_url": reverse(_row_dashboard(key)),
+        "empty": _EMPTY.get(key),
     }
 
 
@@ -118,6 +168,8 @@ def _ordered(user, key, *, downloaded=_UNSET):
 
     The dashboard row and its See all page both call this.
     """
+    if key in _GAME_ROWS:
+        return _ordered_games(user, key)
     kind, media_type = _ROWS[key]
     if kind == "downloaded":
         if downloaded is _UNSET:
@@ -149,13 +201,14 @@ def _page_number(page):
     return number
 
 
+def _named_list(user, name):
+    """Return the user's first list with this exact name."""
+    return CustomList.objects.filter(owner=user, name=name).order_by("id").first()
+
+
 def _downloaded_list(user):
     """Return the user's Downloaded list, if they have one."""
-    return (
-        CustomList.objects.filter(owner=user, name=DOWNLOADED_LIST)
-        .order_by("id")
-        .first()
-    )
+    return _named_list(user, DOWNLOADED_LIST)
 
 
 def _list_row(user, custom_list, media_type, title):
@@ -220,6 +273,8 @@ def _planning_entries(user, media_type):
 
 def _cards(user, key, records):
     """Turn an ordered slice into the cards both views render."""
+    if key in _GAME_ROWS:
+        return _game_cards(user, key, records)
     kind, media_type = _ROWS[key]
     if kind == "downloaded":
         return _attach_tracking(user, media_type, records)
@@ -313,6 +368,7 @@ def _episode_row(user, key):
         "see_all": reverse("dashboard_row", args=[key]),
         "media_type": MediaTypes.TV.value,
         "media": _cards(user, key, shows),
+        "empty": _EMPTY[key],
     }
 
 
@@ -412,6 +468,129 @@ def _pending_episodes(shows):
             if (show_id, season, episode) not in watched:
                 pending[show_id].add((season, episode))
     return pending
+
+
+def _game_row(user, key, game_list):
+    """One capped game row. Continue Playing and Best Owned share this shape."""
+    records = list(_ordered_games(user, key, game_list=game_list)[:ROW_LIMIT])
+    return {
+        "title": _title(key),
+        "see_all": reverse("dashboard_row", args=[key]),
+        "media_type": MediaTypes.GAME.value,
+        "media": _game_cards(user, key, records),
+        "empty": _EMPTY[key],
+    }
+
+
+def _ordered_games(user, key, *, game_list=_UNSET):
+    """Return every game for this row, in the order the cards use."""
+    kind, name = _GAME_ROWS[key]
+    if game_list is _UNSET:
+        game_list = _named_list(user, name)
+    if kind == "continue":
+        return _continue_playing(user, game_list)
+    return _best_owned(user, game_list)
+
+
+def _continue_playing(user, game_list):
+    """In-progress or paused games on this list, newest history first."""
+    if game_list is None:
+        return Game.objects.none()
+    activity = Subquery(
+        Game.history.model.objects.filter(id=OuterRef("pk"))
+        .order_by("-history_date")
+        .values("history_date")[:1],
+    )
+    return (
+        _latest(Game.objects.filter(user=user, item__custom_lists=game_list))
+        .filter(status__in=_PLAYING)
+        .annotate(
+            card_score=F("item__public_rating__metacritic_value"),
+            latest_activity=activity,
+        )
+        .select_related("item")
+        .order_by(
+            F("latest_activity").desc(nulls_last=True),
+            Lower("item__title"),
+        )
+    )
+
+
+def _best_owned(user, game_list):
+    """List games the user has not completed or dropped, highest critic score first."""
+    if game_list is None:
+        return Item.objects.none()
+    latest_status = Subquery(
+        Game.objects.filter(user=user, item_id=OuterRef("pk"))
+        .order_by("-created_at")
+        .values("status")[:1],
+    )
+    return (
+        Item.objects.filter(
+            custom_lists=game_list,
+            media_type=MediaTypes.GAME.value,
+        )
+        .annotate(
+            latest_status=latest_status,
+            card_score=F("public_rating__metacritic_value"),
+        )
+        .filter(Q(latest_status__isnull=True) | Q(latest_status__in=_OWNED))
+        .order_by(F("card_score").desc(nulls_last=True), Lower("title"))
+    )
+
+
+def _game_cards(user, key, records):
+    """Attach tracking and the rounded critic score the badge shows."""
+    if not records:
+        return []
+    kind, _name = _GAME_ROWS[key]
+    if kind == "best":
+        return _attach_game_tracking(user, records)
+    for entry in records:
+        entry.public_rating = _whole_score(entry.card_score)
+    return records
+
+
+def _attach_game_tracking(user, items):
+    """Pair each list item with the user's newest game row, when they have one."""
+    tracked = {}
+    item_ids = [item.id for item in items]
+    if item_ids:
+        queryset = _latest(
+            Game.objects.filter(user=user, item_id__in=item_ids),
+        ).select_related("item")
+        tracked = {entry.item_id: entry for entry in queryset}
+    media = []
+    for item in items:
+        score = _whole_score(item.card_score)
+        entry = tracked.get(item.id)
+        if entry is None:
+            entry = _ListedMedia(item, score)
+        else:
+            entry.public_rating = score
+        media.append(entry)
+    return media
+
+
+def _whole_score(value):
+    """Return a critic score as a whole number. Missing stays missing."""
+    if value is None:
+        return None
+    return int(Decimal(str(value)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def _row_media_type(key):
+    """Return the media type a See all page renders."""
+    if key in _GAME_ROWS:
+        return MediaTypes.GAME.value
+    return _ROWS[key][1]
+
+
+def _row_dashboard(key):
+    """Return the dashboard a See all page links back to."""
+    if key in _GAME_ROWS:
+        return "dashboard_games"
+    return "dashboard_movies_tv"
 
 
 def _by_public_score(queryset, title_field, score_field="public_rating"):

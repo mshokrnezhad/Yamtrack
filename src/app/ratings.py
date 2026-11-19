@@ -21,7 +21,7 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from app.models import Item, ItemRating, MediaTypes, Sources
-from app.providers import omdb, services
+from app.providers import igdb, omdb, services
 
 logger = logging.getLogger(__name__)
 
@@ -347,7 +347,68 @@ def refresh_stale_ratings(*, batch_size=100):
             updated += 1
         elif result == "updated":
             updated += 1
+    updated += refresh_game_critic_scores(batch_size=batch_size)
     return updated, deferred
+
+
+def refresh_game_critic_scores(*, batch_size=100, stale_only=True):
+    """Store IGDB aggregated ratings on game items, in primary-key order.
+
+    Stale means no ``ItemRating``, a null ``ratings_updated_at``, or a fetch
+    older than ``RATINGS_MAX_AGE``. A failed batch is logged and skipped.
+    Returns how many items were saved.
+    """
+    saved = 0
+    last_pk = 0
+    base = Item.objects.filter(
+        source=Sources.IGDB.value,
+        media_type=MediaTypes.GAME.value,
+    )
+    if stale_only:
+        cutoff = timezone.now() - RATINGS_MAX_AGE
+        base = base.filter(
+            Q(public_rating__isnull=True)
+            | Q(public_rating__ratings_updated_at__isnull=True)
+            | Q(public_rating__ratings_updated_at__lt=cutoff),
+        )
+    while True:
+        batch = list(base.filter(pk__gt=last_pk).order_by("pk")[:batch_size])
+        if not batch:
+            return saved
+        last_pk = batch[-1].pk
+        pairs = []
+        for item in batch:
+            try:
+                pairs.append((item, int(item.media_id)))
+            except (TypeError, ValueError):
+                continue
+        if not pairs:
+            continue
+        try:
+            scores = igdb.critic_scores([igdb_id for _item, igdb_id in pairs])
+        except (requests.RequestException, services.ProviderAPIError):
+            logger.exception("Skipping an IGDB critic-score batch")
+            continue
+        updated_at = timezone.now()
+        for item, igdb_id in pairs:
+            _store_critic_score(item, scores.get(igdb_id), updated_at)
+            saved += 1
+
+
+def _store_critic_score(item, value, updated_at):
+    """Write one critic score. A missing rating is stored as NULL."""
+    rating, _created = ItemRating.objects.get_or_create(item=item)
+    raw, normalized = normalize(value, SOURCE_SCALE["metacritic"])
+    rating.metacritic_value = raw
+    rating.metacritic_normalized = normalized
+    rating.ratings_updated_at = updated_at
+    rating.save(
+        update_fields=[
+            "metacritic_value",
+            "metacritic_normalized",
+            "ratings_updated_at",
+        ],
+    )
 
 
 def fill_tmdb_votes_from_cache(*, batch_size=100):

@@ -505,11 +505,11 @@ class RootRedirectTests(TestCase):
         self.assertContains(response, f'href="{reverse("home")}?sort=')
 
     def test_dashboard_renders(self):
-        """GET /dashboard returns the dashboard page."""
+        """GET /dashboard returns the chooser."""
         response = self.client.get(reverse("dashboard"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertTemplateUsed(response, "app/dashboard.html")
+        self.assertTemplateUsed(response, "app/dashboard_home.html")
 
     def test_anonymous_root_ends_at_login_then_dashboard(self):
         """A logged-out GET / reaches login, and signing in opens the dashboard."""

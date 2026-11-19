@@ -93,6 +93,54 @@
   scroll-snap-align: start;
 }
 
+/* Chooser tiles. Plain CSS because main.css is committed and not rebuilt. */
+.dashboard-choices {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+}
+
+@media (width >= 40rem) {
+  .dashboard-choices {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.dashboard-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  min-height: 12rem;
+  padding: 2rem;
+  border-radius: 0.75rem;
+  background: #2a2f35;
+  box-shadow: 0 0 0 1px #3e454d;
+  color: #fff;
+  text-decoration: none;
+}
+
+.dashboard-choice:hover {
+  background: #323840;
+  box-shadow: 0 0 0 1px #6366f1;
+}
+
+.dashboard-choice-icon {
+  display: block;
+  width: 3.5rem;
+  height: 3.5rem;
+  color: #6366f1;
+}
+
+.dashboard-choice-label {
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.25;
+  color: #fff;
+  text-align: center;
+}
+
 /* https://tailwindcss.com/docs/upgrade-guide#hover-styles-on-mobile */
 @custom-variant hover-tap (&:hover);
 @custom-variant parent-hover-tap (.hover-tap:hover &);

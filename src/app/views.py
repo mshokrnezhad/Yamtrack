@@ -143,11 +143,35 @@ def dashboard_refresh_status(request, task_id):
 
 @require_GET
 def dashboard_view(request):
-    """Personal home rows for the logged-in user."""
+    """Chooser for the movie and game dashboards."""
+    return render(request, "app/dashboard_home.html")
+
+
+@require_GET
+def dashboard_movies_tv(request):
+    """Movie and TV rows for the logged-in user."""
     return render(
         request,
         "app/dashboard.html",
-        {"rows": dashboard.build_rows(request.user)},
+        {
+            "page_title": _("Movies & TV"),
+            "show_refresh": True,
+            "rows": dashboard.build_rows(request.user),
+        },
+    )
+
+
+@require_GET
+def dashboard_games(request):
+    """Game rows for the logged-in user."""
+    return render(
+        request,
+        "app/dashboard.html",
+        {
+            "page_title": _("Games"),
+            "show_refresh": False,
+            "rows": dashboard.build_game_rows(request.user),
+        },
     )
 
 

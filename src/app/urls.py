@@ -28,6 +28,8 @@ urlpatterns = [
         views.dashboard_refresh_status,
         name="dashboard_refresh_status",
     ),
+    path("dashboard/movies-tv", views.dashboard_movies_tv, name="dashboard_movies_tv"),
+    path("dashboard/games", views.dashboard_games, name="dashboard_games"),
     path("dashboard/<slug:row_key>", views.dashboard_row, name="dashboard_row"),
     path("<str:username>/<media_type:media_type>", views.media_list, name="medialist"),
     path("search", views.media_search, name="search"),

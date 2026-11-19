@@ -42,9 +42,11 @@ You can try the app at [yamtrack.fuzzygrim.com](https://yamtrack.fuzzygrim.com) 
 
 ## Personal dashboard
 
-`/` redirects to `/dashboard`. The upstream Home view lives at `/home`.
+`/` redirects to `/dashboard`, a chooser with **Movies & TV** (`/dashboard/movies-tv`) and **Games** (`/dashboard/games`). The upstream Home view lives at `/home`.
 
-This fork opens on a personal dashboard with six rows. Each row shows 10 titles. **See all** opens the same titles in the same order, without that cap, as a responsive grid of the same cards. Long lists load further pages as you scroll.
+Movies & TV is the six rows below. Games lists Continue Playing and Best Owned for the custom lists named `Xbox` and `Nintendo Switch`. A game in both lists appears on both platforms. A missing list leaves those rows empty. Continue Playing is games marked In progress or Paused, most recently updated first. Best Owned is every other game on that list except ones marked Completed or Dropped, highest IGDB critic score first, including games that are not tracked yet.
+
+This fork's movie and TV dashboard has six rows. Each row shows 10 titles. **See all** opens the same titles in the same order, without that cap, as a responsive grid of the same cards. Long lists load further pages as you scroll.
 
 | Row | Route | What it lists |
 | --- | --- | --- |
@@ -55,7 +57,7 @@ This fork opens on a personal dashboard with six rows. Each row shows 10 titles.
 | Continue watching | `/dashboard/continue-watching` | In progress shows that still have an aired episode you have not watched (specials excluded), most recently watched first |
 | New episodes | `/dashboard/new-episodes` | In progress shows that still have an aired episode you have not watched (specials excluded), most recently aired episode first |
 
-Continue watching and New episodes cards show the next episode (for example `S1E2`) and how many aired episodes are left. Downloaded and Planning cards show the public score.
+Continue watching and New episodes cards show the next episode (for example `S1E2`) and how many aired episodes are left. Downloaded and Planning cards show the public score. Game cards show IGDB's aggregated critic rating as a whole number from 0 to 100. That rating is stored in the item's Metacritic fields. `manage.py refresh_game_critic_scores` backfills it (`--all` refreshes every game). The nightly public-ratings job refreshes stale games.
 
 **Refresh** reloads your calendar, then marks a show completed when it has ended or been canceled and every aired episode is watched.
 
