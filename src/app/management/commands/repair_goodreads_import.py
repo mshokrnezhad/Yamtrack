@@ -10,8 +10,8 @@ class Command(BaseCommand):
     """Import missing Goodreads rows and repair mismatched titles."""
 
     help = (
-        "Re-run a Goodreads export for one user. Rows with no Goodreads id "
-        "are imported, and a title mismatch is moved off the wrong catalog item."
+        "Re-run a Goodreads export for one user. Each Book Id becomes a "
+        "Goodreads item, and a book still on another item is moved onto it."
     )
 
     def add_arguments(self, parser):

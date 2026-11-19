@@ -49,6 +49,7 @@ class Sources(models.TextChoices):
     HARDCOVER = "hardcover", "Hardcover"
     COMICVINE = "comicvine", "Comic Vine"
     BGG = "bgg", "BoardGameGeek"
+    GOODREADS = "goodreads", "Goodreads"
     MANUAL = "manual", _("Manual")
 
 
@@ -227,6 +228,8 @@ class ItemRating(models.Model):
     Letterboxd does not change it. Goodreads fields come from the CSV import.
     They are separate from the IGDB critic score in the Metacritic fields.
     ``goodreads_ratings_count`` is how many ratings that average is based on.
+    ``author``, ``publication_year``, and ``isbn`` are the edition fields from
+    that export, so a Goodreads page can render without a catalog lookup.
     """
 
     item = models.OneToOneField(
@@ -311,6 +314,9 @@ class ItemRating(models.Model):
     )
     goodreads_ratings_count = models.PositiveIntegerField(null=True, blank=True)
     page_count = models.PositiveIntegerField(null=True, blank=True)
+    author = models.CharField(max_length=512, blank=True, default="")
+    publication_year = models.PositiveIntegerField(null=True, blank=True)
+    isbn = models.CharField(max_length=32, blank=True, default="")
     ratings_updated_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):

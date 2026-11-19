@@ -593,8 +593,12 @@ def update_media_score(request, media_type, instance_id):
 @require_POST
 def sync_metadata(request, source, media_type, media_id, season_number=None):
     """Refresh the metadata for a media item."""
-    if source == Sources.MANUAL.value:
-        msg = _("Manual items cannot be synced.")
+    if source in {Sources.MANUAL.value, Sources.GOODREADS.value}:
+        msg = (
+            _("Goodreads items cannot be synced.")
+            if source == Sources.GOODREADS.value
+            else _("Manual items cannot be synced.")
+        )
         messages.error(request, msg)
         return HttpResponse(
             msg,

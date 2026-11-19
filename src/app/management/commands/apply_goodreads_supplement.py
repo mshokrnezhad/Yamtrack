@@ -9,8 +9,8 @@ class Command(BaseCommand):
     """Apply a Goodreads ratings CSV and optional reading progress."""
 
     help = (
-        "Set Goodreads averages and rating counts from a CSV, and optionally "
-        "pages read. Does not call the network or mark books completed."
+        "Set Goodreads averages, rating counts, pages read, and cover URLs "
+        "from CSVs. Does not call the network or mark books completed."
     )
 
     def add_arguments(self, parser):
@@ -26,6 +26,12 @@ class Command(BaseCommand):
             help="CSV with book_id,pages_read,total_pages.",
         )
         parser.add_argument(
+            "--covers",
+            dest="covers_csv",
+            default="",
+            help="CSV with book_id,cover_url. Does not download image files.",
+        )
+        parser.add_argument(
             "--username",
             default="",
             help="User whose currently-reading progress is updated.",
@@ -36,10 +42,18 @@ class Command(BaseCommand):
         user = _user(options["username"])
         ratings_csv = options["ratings_csv"]
         progress_csv = options["progress_csv"] or None
+        covers_csv = options["covers_csv"] or None
         _require_file(ratings_csv)
         if progress_csv:
             _require_file(progress_csv)
-        stats = goodreads.apply_supplement(ratings_csv, user, progress_csv)
+        if covers_csv:
+            _require_file(covers_csv)
+        stats = goodreads.apply_supplement(
+            ratings_csv,
+            user,
+            progress_csv,
+            covers_csv,
+        )
         self.stdout.write(goodreads.format_summary(stats))
 
 

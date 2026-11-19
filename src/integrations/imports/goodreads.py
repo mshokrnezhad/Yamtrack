@@ -1,15 +1,11 @@
 import logging
-import re
-import unicodedata
 from collections import defaultdict
 from csv import DictReader
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from difflib import SequenceMatcher
 from io import StringIO
 from pathlib import Path
 
-from django.apps import apps
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
@@ -20,7 +16,7 @@ from app.models import Book, Item, ItemRating, MediaTypes, Sources, Status
 from app.providers import services
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
-from lists.models import CustomList, CustomListItem
+from lists.models import CustomList
 
 logger = logging.getLogger(__name__)
 
@@ -28,18 +24,7 @@ logger = logging.getLogger(__name__)
 GOODREADS_MIN_RATING = 1
 GOODREADS_MAX_RATING = 5
 GOODREADS_SCORE_SCALE = 2
-# ponytail: ratio/token overlap misses translations that are not the same
-# string. An ISBN hit bypasses this; otherwise the row becomes a manual item.
-TITLE_MATCH_RATIO = 0.82
-TITLE_TOKEN_OVERLAP = 0.8
 RATING_COUNT_COLUMNS = ("Ratings Count", "ratings_count", "Number of Ratings")
-GOODREADS_RATING_FIELDS = (
-    "goodreads_id",
-    "goodreads_value",
-    "goodreads_normalized",
-    "goodreads_ratings_count",
-    "page_count",
-)
 # These shelves are a status, not a custom list.
 SHELF_STATUS = {
     "read": Status.COMPLETED,
@@ -82,21 +67,23 @@ def resolve_user(username):
     return user
 
 
-def apply_supplement(ratings_csv, user, progress_csv=None):
-    """Apply a ratings CSV and an optional currently-reading progress CSV.
+def apply_supplement(ratings_csv, user, progress_csv=None, covers_csv=None):
+    """Apply ratings, progress, and cover CSVs. No network calls.
 
-    No network calls. Blank averages are skipped. Unknown Goodreads ids are
-    counted as missing.
+    Blank averages are skipped. Unknown Goodreads ids are counted as missing.
+    An empty cover URL leaves the image already stored on the item.
     """
     stats = {"updated": 0, "missing": 0, "repaired": 0, "created": 0}
     _apply_ratings(_read_csv(ratings_csv), stats)
     if progress_csv:
         _apply_progress(_read_csv(progress_csv), user, stats)
+    if covers_csv:
+        _apply_covers(_read_csv(covers_csv), stats)
     return stats
 
 
 class GoodReadsImporter:
-    """Class to handle importing goodreads data from CSV files."""
+    """Import Goodreads rows as Goodreads items. No catalog lookup."""
 
     def __init__(self, file, user, mode):
         """Initialize the importer with file, user, and mode.
@@ -111,23 +98,14 @@ class GoodReadsImporter:
         self.mode = mode
         self.warnings = []
         self.stats = {"updated": 0, "missing": 0, "repaired": 0, "created": 0}
-
-        # Track existing media for "new" mode
         self.existing_media = helpers.get_existing_media(user)
         self._index_goodreads_books()
-        # source + media id -> Goodreads id, including rows earlier in this file.
-        self._index_claims()
-
-        # Track existing media changed in "new" mode, by primary key
+        # Book ids already handled in this file, so a repeated row is not a
+        # second book.
+        self._handled = set()
         self.to_update = defaultdict(dict)
-
-        # Track media IDs to delete in overwrite mode
         self.to_delete = defaultdict(lambda: defaultdict(set))
-
-        # Track bulk creation lists for each media type
         self.bulk_media = defaultdict(list)
-
-        # Custom shelf name -> list, so one import does not create duplicates.
         self.custom_lists = {}
 
         logger.info(
@@ -167,8 +145,6 @@ class GoodReadsImporter:
                 error_msg = _("Error processing entry: %(row)s") % {"row": row}
                 raise MediaImportUnexpectedError(error_msg) from error
 
-        logger.debug("processed %s", self.bulk_media)
-
         helpers.cleanup_existing_media(self.to_delete, self.user)
         helpers.bulk_create_media(self.bulk_media, self.user)
         helpers.bulk_update_media(
@@ -177,13 +153,10 @@ class GoodReadsImporter:
             self.user,
         )
 
-        logger.debug("processed %s", self.bulk_media)
-
         imported_counts = {
             media_type: len(media_list)
             for media_type, media_list in self.bulk_media.items()
         }
-
         deduplicated_messages = "\n".join(dict.fromkeys(self.warnings))
         return imported_counts, deduplicated_messages
 
@@ -202,7 +175,6 @@ class GoodReadsImporter:
 
     def _index_goodreads_books(self):
         """Map this user's Goodreads ids to the book already imported."""
-        self._goodreads_items = {}
         self._books_by_goodreads = {}
         books = Book.objects.filter(user=self.user).select_related(
             "item__public_rating",
@@ -211,61 +183,10 @@ class GoodReadsImporter:
             rating = _rating_or_none(book.item)
             if rating is None or not rating.goodreads_id:
                 continue
-            self._goodreads_items[rating.goodreads_id] = book.item
-            self._books_by_goodreads.setdefault(rating.goodreads_id, book)
-
-    def _index_claims(self):
-        """Map each catalog item to the Goodreads id already stored on it."""
-        self._claims = {}
-        claimed = ItemRating.objects.exclude(goodreads_id="").values_list(
-            "item__source",
-            "item__media_id",
-            "goodreads_id",
-        )
-        for source, media_id, goodreads_id in claimed:
-            self._claims[_claim_key(source, media_id)] = goodreads_id
-
-    def _claim_owner(self, source, media_id):
-        """Return the Goodreads id that owns this item, or an empty string."""
-        key = _claim_key(source, media_id)
-        if key in self._claims:
-            return self._claims[key]
-        owner = (
-            ItemRating.objects.filter(
-                item__source=source,
-                item__media_id=str(media_id),
-                item__media_type=MediaTypes.BOOK.value,
-            )
-            .exclude(goodreads_id="")
-            .values_list("goodreads_id", flat=True)
-            .first()
-        )
-        self._claims[key] = owner or ""
-        return self._claims[key]
-
-    def _claimed_by_other(self, book, row):
-        """Return whether a different Goodreads id already uses this item."""
-        owner = self._claim_owner(book.get("source"), book.get("media_id"))
-        return bool(owner) and owner != self._book_id(row)
-
-    def _claim_item(self, source, media_id, book_id):
-        """Remember that this Goodreads id is using the item.
-
-        A later row in the same file consults this before its rating is saved.
-        An id already stored for a different book is left in place.
-        """
-        if not book_id:
-            return
-        key = _claim_key(source, media_id)
-        owner = self._claims.get(key)
-        if owner and owner != book_id:
-            return
-        self._claims[key] = book_id
+            self._books_by_goodreads[rating.goodreads_id] = book
 
     def _process_row(self, row):
-        """Process a single row from the CSV file."""
-        # Skip early (before hitting the provider) when the shelf can't be
-        # mapped to a Yamtrack status.
+        """Create or reuse the Goodreads item for this Book Id."""
         if self._determine_status(row) is None:
             shelf = row["Exclusive Shelf"]
             self.warnings.append(
@@ -273,324 +194,97 @@ class GoodReadsImporter:
             )
             return
 
-        book = dict(self._search_book(row))
-        book["source"] = book.get("source") or Sources.HARDCOVER.value
-        book["media_id"] = str(book["media_id"])
-        book["image"] = book.get("image") or settings.IMG_NONE
-
-        if self._repair_mismatch(book, row):
+        book_id = self._book_id(row)
+        if not book_id:
+            self.warnings.append(f"{self._row_description(row)}: Missing Book Id.")
             return
 
-        self._import_resolved(self._reuse_matching_item(book, row), row)
-
-    def _repair_mismatch(self, book, row):
-        """Move a mismatched Goodreads id onto the resolved item.
-
-        An ISBN hit whose catalog title is another language shares the media
-        id, so it is not treated as a mismatch. Open Library and manual items
-        are retitled from the CSV instead of moved. The old catalog item is
-        left unchanged: it may be a different work.
-        """
-        stored = self._goodreads_items.get(self._book_id(row))
-        if stored is None or _same_item(stored, book):
-            return False
-        if self._keep_stored(stored, row):
-            return False
-        self._move_user_book(stored, book, row)
-        return True
-
-    def _keep_stored(self, stored, row):
-        """Return whether this Goodreads id should stay on its current item.
-
-        Open Library and manual items keep the CSV title, so a romanized
-        catalog title is not a reason to leave them. A Hardcover item stays
-        when its title still matches the CSV.
-        """
-        if stored.source in (Sources.OPENLIBRARY.value, Sources.MANUAL.value):
-            return True
-        return _titles_match(row.get("Title"), stored.title)
-
-    def _reuse_matching_item(self, book, row):
-        """Keep the item already imported for this Goodreads id."""
-        stored = self._goodreads_items.get(self._book_id(row))
-        if stored is None or _same_item(stored, book):
-            return book
-        if not self._keep_stored(stored, row):
-            return book
-        return self._with_csv_title(
-            {
-                "media_id": stored.media_id,
-                "source": stored.source,
-                "title": stored.title,
-                "image": stored.image,
-            },
-            row,
-        )
-
-    def _move_user_book(self, old_item, book, row):
-        """Move this user's book, Goodreads fields, and lists onto ``book``."""
-        book_id = self._book_id(row)
         with transaction.atomic():
-            new_item, _created = self._create_or_update_item(book)
-            self._move_rating(old_item, new_item)
-            self._move_lists(old_item, new_item)
-            moved = self._move_books(old_item, new_item, book_id)
-            if self._store_goodreads(new_item, row) is False:
-                return
-            self._retitle_from_csv(new_item, row)
-            self._assign_custom_shelves(new_item, row)
+            item = self._ensure_item(row, book_id)
+            self._store_goodreads(item, row)
+            self._assign_custom_shelves(item, row)
 
-        self.stats["repaired"] += 1
-        logger.info(
-            "Repaired Goodreads %s for %s onto item %s",
-            book_id,
-            self.user.username,
-            new_item.pk,
+        if book_id in self._handled:
+            return
+        self._handled.add(book_id)
+        self._import_book(item, row, book_id)
+
+    def _ensure_item(self, row, book_id):
+        """Return the Goodreads item for this Book Id, keeping its cover."""
+        title = _row_title(row)
+        item, created = Item.objects.get_or_create(
+            media_id=book_id,
+            source=Sources.GOODREADS.value,
+            media_type=MediaTypes.BOOK.value,
+            defaults={
+                "title": title,
+                "image": settings.IMG_NONE,
+            },
         )
-        if moved is None:
-            return
-        if helpers.sync_existing_media(moved, self._get_values(row)):
-            self.to_update[MediaTypes.BOOK.value][moved.pk] = moved
+        if not created and item.title != title:
+            item.title = title
+            item.save(update_fields=["title"])
+        return item
 
-    def _move_books(self, old_item, new_item, book_id):
-        """Point this user's books at the replacement item."""
-        books = list(Book.objects.filter(user=self.user, item=old_item))
-        if not books:
-            return None
-        Book.objects.filter(pk__in=[book.pk for book in books]).update(item=new_item)
-        old_bucket = self.existing_media[MediaTypes.BOOK.value][old_item.source]
-        old_bucket.pop(str(old_item.media_id), None)
-        for book in books:
-            book.item = new_item
-        kept = self._books_by_goodreads.get(book_id) or books[0]
-        kept.item = new_item
-        source = new_item.source
-        media_id = str(new_item.media_id)
-        self.existing_media[MediaTypes.BOOK.value][source][media_id] = kept
-        self._goodreads_items[book_id] = new_item
-        self._books_by_goodreads[book_id] = kept
-        return kept
-
-    def _move_rating(self, old_item, new_item):
-        """Copy Goodreads fields off the mismatched item."""
-        old = _rating_or_none(old_item)
-        if old is None:
-            return
-        new, _created = ItemRating.objects.get_or_create(item=new_item)
-        for field in GOODREADS_RATING_FIELDS:
-            setattr(new, field, getattr(old, field))
-        new.save(update_fields=list(GOODREADS_RATING_FIELDS))
-        moved_id = old.goodreads_id
-        old.goodreads_id = ""
-        old.goodreads_value = None
-        old.goodreads_normalized = None
-        old.goodreads_ratings_count = None
-        old.page_count = None
-        old.save(update_fields=list(GOODREADS_RATING_FIELDS))
-        self._claims[_claim_key(old_item.source, old_item.media_id)] = ""
-        if moved_id:
-            self._claims[_claim_key(new_item.source, new_item.media_id)] = moved_id
-
-    def _move_lists(self, old_item, new_item):
-        """Move this user's shelf memberships onto the replacement item."""
-        memberships = CustomListItem.objects.filter(
-            item=old_item,
-            custom_list__owner=self.user,
-        )
-        for membership in memberships:
-            already = CustomListItem.objects.filter(
-                item=new_item,
-                custom_list_id=membership.custom_list_id,
-            ).exists()
-            if already:
-                membership.delete()
-                continue
-            membership.item = new_item
-            membership.save(update_fields=["item"])
-
-    def _import_resolved(self, book, row):
-        """Create or update the book from a resolved catalog or manual item."""
-        source = book["source"]
-        media_id = str(book["media_id"])
-        book_id = self._book_id(row)
-        # Claim before the rating row is saved so the next CSV row cannot
-        # take this item.
-        self._claim_item(source, media_id, book_id)
-        existing = self._get_existing(media_id, source, book_id, row.get("Title"))
-        if existing:
-            item = existing.item
-        else:
-            item, _created = self._create_or_update_item(book)
-
-        if self._store_goodreads(item, row) is False:
-            return
-        self._retitle_from_csv(item, row)
-        self._assign_custom_shelves(item, row)
-
-        if existing:
-            self.stats["updated"] += 1
-            if helpers.sync_existing_media(existing, self._get_values(row)):
+    def _import_book(self, item, row, book_id):
+        """Create this user's book, or update the one already tracked."""
+        existing = self._books_by_goodreads.get(book_id)
+        if existing is not None and existing.item_id != item.id:
+            self._move_book(existing, item, book_id)
+            self.stats["repaired"] += 1
+            if self.mode == "new" and helpers.sync_existing_media(
+                existing,
+                self._get_values(row),
+            ):
                 self.to_update[MediaTypes.BOOK.value][existing.pk] = existing
-            return
+            if self.mode == "new":
+                return
 
-        # Check if we should process this entry based on mode
+        if self.mode == "new":
+            tracked = self._tracked_book(item, book_id, existing)
+            if tracked is not None:
+                self.stats["updated"] += 1
+                if helpers.sync_existing_media(tracked, self._get_values(row)):
+                    self.to_update[MediaTypes.BOOK.value][tracked.pk] = tracked
+                return
+
         if not helpers.should_process_media(
             self.existing_media,
             self.to_delete,
             MediaTypes.BOOK.value,
-            source,
-            media_id,
+            Sources.GOODREADS.value,
+            book_id,
             self.mode,
         ):
             return
 
-        instance = self._create_media_instance(item, row)
-        self.bulk_media[MediaTypes.BOOK.value].append(instance)
+        self.bulk_media[MediaTypes.BOOK.value].append(
+            self._create_media_instance(item, row),
+        )
         self.stats["created"] += 1
 
-    def _get_existing(self, media_id, source, book_id, csv_title):
-        """Get the book already in Yamtrack, only tracked in "new" mode.
-
-        A Goodreads id matches even when an earlier import used another source.
-        A stored title that is a different work is not reused here.
-        """
-        if self.mode != "new":
-            return None
-
-        existing = self.existing_media[MediaTypes.BOOK.value][source].get(
-            str(media_id),
-        )
-        if existing is not None:
+    def _tracked_book(self, item, book_id, existing):
+        """Return this user's book when it already points at ``item``."""
+        tracked = self.existing_media[MediaTypes.BOOK.value][
+            Sources.GOODREADS.value
+        ].get(book_id)
+        if tracked is not None:
+            return tracked
+        if existing is not None and existing.item_id == item.id:
             return existing
-
-        book = self._books_by_goodreads.get(book_id)
-        if book is None or not _titles_match(csv_title, book.item.title):
-            return None
-        return book
-
-    def _search_book(self, row, source=Sources.HARDCOVER):
-        """Resolve a row without letting two Goodreads ids share an item.
-
-        ISBN hits are trusted, including a Hardcover title in another language.
-        A title-only hit is kept only when it matches the CSV title. A catalog
-        item already used by a different Goodreads id is skipped: Hardcover
-        falls through to Open Library, and a claimed or missing Open Library
-        hit becomes a manual item. Open Library titles come from the CSV.
-        """
-        found = self._search_catalog(row, source)
-        if found is not None and not self._claimed_by_other(found, row):
-            return self._with_csv_title(found, row)
-        if found is not None and found.get("source") == Sources.HARDCOVER.value:
-            library = self._search_openlibrary(row)
-            if library is not None and not self._claimed_by_other(library, row):
-                return self._with_csv_title(library, row)
-        return self._manual_book((row.get("Title") or "").strip())
-
-    def _search_openlibrary(self, row):
-        """Search Open Library by ISBN, then by title."""
-        providers = [Sources.OPENLIBRARY]
-        isbn = _clean_isbn(row.get("ISBN13"))
-        title = (row.get("Title") or "").strip()
-        if isbn:
-            hit = self._isbn_hit(isbn, providers)
-            if hit is not None:
-                return hit
-        if not title:
-            return None
-        author = (row.get("Author") or "").strip()
-        return self._title_hit(title, author, providers)
-
-    def _with_csv_title(self, book, row):
-        """Use the CSV title for Open Library and manual items."""
-        if book.get("source") not in (
-            Sources.OPENLIBRARY.value,
-            Sources.MANUAL.value,
-        ):
-            return book
-        title = (row.get("Title") or "").strip()
-        if title:
-            book["title"] = title
-        return book
-
-    def _retitle_from_csv(self, item, row):
-        """Store the CSV title on an Open Library or manual item."""
-        if item.source not in (Sources.OPENLIBRARY.value, Sources.MANUAL.value):
-            return
-        title = (row.get("Title") or "").strip()
-        if not title or item.title == title:
-            return
-        item.title = title
-        item.save(update_fields=["title"])
-
-    def _search_catalog(self, row, source):
-        """Search catalogs. None means the caller should create a manual item."""
-        providers = _provider_order(source)
-        isbn = _clean_isbn(row.get("ISBN13"))
-        title = (row.get("Title") or "").strip()
-        if isbn:
-            hit = self._isbn_hit(isbn, providers)
-            if hit is not None:
-                return hit
-        if not title:
-            return None
-        author = (row.get("Author") or "").strip()
-        return self._title_hit(title, author, providers)
-
-    def _isbn_hit(self, isbn, providers):
-        """Return the first ISBN hit. The catalog title is not compared."""
-        for provider in providers:
-            found = self._first_result(isbn, provider)
-            if found is not None:
-                return found
         return None
 
-    def _title_hit(self, title, author, providers):
-        """Return the first title search whose title matches the CSV title."""
-        for provider in providers:
-            for query in _title_queries(title, author):
-                found = self._first_result(query, provider)
-                if found is not None and _titles_match(title, found.get("title")):
-                    return found
-        return None
-
-    def _manual_book(self, title):
-        """Build an unsaved manual book using the CSV title."""
-        return {
-            "media_id": Item.generate_manual_id(),
-            "source": Sources.MANUAL.value,
-            "media_type": MediaTypes.BOOK.value,
-            "title": title or "Unknown",
-            "image": settings.IMG_NONE,
-        }
-
-    def _first_result(self, query, source):
-        """Return the first hit for a query, stamped with the source we asked."""
-        results = services.search(
-            MediaTypes.BOOK.value,
-            query,
-            1,
-            source.value,
-        ).get("results", [])
-        if not results:
-            return None
-        hit = dict(results[0])
-        hit["source"] = hit.get("source") or source.value
-        hit["media_id"] = str(hit["media_id"])
-        hit["image"] = hit.get("image") or settings.IMG_NONE
-        return hit
-
-    def _create_or_update_item(self, book):
-        """Create or update the item in database."""
-        source = book.get("source") or Sources.HARDCOVER.value
-        return Item.objects.update_or_create(
-            media_id=str(book["media_id"]),
-            source=source,
-            media_type=MediaTypes.BOOK.value,
-            defaults={
-                "title": book["title"],
-                "image": book["image"],
-            },
+    def _move_book(self, book, item, book_id):
+        """Point this user's book at the Goodreads item for the same Book Id."""
+        old_item = book.item
+        Book.objects.filter(pk=book.pk).update(item=item)
+        book.item = item
+        self.existing_media[MediaTypes.BOOK.value][old_item.source].pop(
+            str(old_item.media_id),
+            None,
         )
+        self.existing_media[MediaTypes.BOOK.value][item.source][book_id] = book
+        self._books_by_goodreads[book_id] = book
 
     def _determine_status(self, row):
         """Map a Goodreads exclusive shelf to a status, or None if unmapped."""
@@ -632,39 +326,43 @@ class GoodReadsImporter:
         return _parse_count(raw)
 
     def _store_goodreads(self, item, row):
-        """Save the Goodreads id, community average, rating count, and pages.
-
-        Return False when another Goodreads id already owns the item, so the
-        caller does not add shelves or a book onto it.
-        """
+        """Save the Goodreads id, average, pages, author, year, and ISBN."""
         book_id = self._book_id(row)
-        average = _parse_average_rating(row.get("Average Rating"))
-        pages = self._parse_pages(row.get("Number of Pages"))
-        count = _row_ratings_count(row)
-        if not book_id and average is None and pages is None and count is None:
-            return True
-
+        ItemRating.objects.filter(goodreads_id=book_id).exclude(item=item).update(
+            goodreads_id="",
+        )
         rating, _created = ItemRating.objects.get_or_create(item=item)
         fields = []
-        if book_id and rating.goodreads_id and rating.goodreads_id != book_id:
-            return False
         if book_id:
             rating.goodreads_id = book_id
             fields.append("goodreads_id")
-            self._claim_item(item.source, item.media_id, book_id)
+        average = _parse_average_rating(row.get("Average Rating"))
         if average is not None:
             rating.goodreads_value = average
             rating.goodreads_normalized = _normalize_average(average)
             fields.extend(("goodreads_value", "goodreads_normalized"))
+        count = _row_ratings_count(row)
         if count is not None:
             rating.goodreads_ratings_count = count
             fields.append("goodreads_ratings_count")
+        pages = self._parse_pages(row.get("Number of Pages"))
         if pages is not None:
             rating.page_count = pages
             fields.append("page_count")
+        author = (row.get("Author") or "").strip()
+        if author:
+            rating.author = author
+            fields.append("author")
+        year = _publication_year(row)
+        if year is not None:
+            rating.publication_year = year
+            fields.append("publication_year")
+        isbn = _row_isbn(row)
+        if isbn:
+            rating.isbn = isbn
+            fields.append("isbn")
         if fields:
             rating.save(update_fields=fields)
-        return True
 
     def _assign_custom_shelves(self, item, row):
         """Add the book to one list per shelf that is not an exclusive status."""
@@ -702,19 +400,12 @@ class GoodReadsImporter:
 
     def _create_media_instance(self, item, row):
         """Create media instance with all parameters."""
-        model = apps.get_model(app_label="app", model_name=MediaTypes.BOOK.value)
-
-        # Parse dates
         date_created = self._parse_goodreads_date(row.get("Date Added", ""))
         date_rated = self._parse_goodreads_date(row.get("Date Read", ""))
+        present = [value for value in (date_created, date_rated) if value]
 
-        # filter out None dates
-        dates = [date_created, date_rated]
-        most_recent_date = max(date for date in dates if date)
-
-        instance = model(item=item, user=self.user, **self._get_values(row))
-        instance._history_date = most_recent_date or timezone.now()
-
+        instance = Book(item=item, user=self.user, **self._get_values(row))
+        instance._history_date = max(present) if present else timezone.now()
         return instance
 
     def _book_id(self, row):
@@ -781,33 +472,30 @@ def _apply_progress(rows, user, stats):
         stats["updated"] += 1
 
 
-def _provider_order(source):
-    """Search the requested source first, then the other book catalog."""
-    order = []
-    for provider in (source, Sources.HARDCOVER, Sources.OPENLIBRARY):
-        if provider not in order:
-            order.append(provider)
-    return order
-
-
-def _title_queries(title, author):
-    """Return the title, then title plus author when an author is present."""
-    queries = [title]
-    if author:
-        queries.append(f"{title} {author}")
-    return queries
-
-
-def _same_item(item, book):
-    """Return whether ``item`` is the catalog row ``book`` resolved to."""
-    return item.source == book.get("source") and item.media_id == str(
-        book.get("media_id"),
-    )
-
-
-def _claim_key(source, media_id):
-    """Return the in-memory key for one catalog item."""
-    return (source, str(media_id))
+def _apply_covers(rows, stats):
+    """Set cover URLs on Goodreads items. Do not download the files."""
+    for row in rows:
+        book_id = str(row.get("book_id") or "").strip()
+        url = str(row.get("cover_url") or "").strip()
+        if not book_id:
+            stats["missing"] += 1
+            continue
+        rating = (
+            ItemRating.objects.filter(goodreads_id=book_id)
+            .select_related("item")
+            .order_by("id")
+            .first()
+        )
+        if rating is None or rating.item.source != Sources.GOODREADS.value:
+            stats["missing"] += 1
+            continue
+        if not url:
+            continue
+        item = rating.item
+        if item.image != url:
+            item.image = url
+            item.save(update_fields=["image"])
+        stats["updated"] += 1
 
 
 def _rating_or_none(item):
@@ -826,6 +514,40 @@ def _clean_isbn(value):
     if text.startswith("="):
         text = text[1:].strip()
     return text.strip("\"'").strip()
+
+
+def _row_isbn(row):
+    """Return the cleaned ISBN13, or the cleaned ISBN when ISBN13 is empty."""
+    isbn13 = _clean_isbn(row.get("ISBN13"))
+    if isbn13:
+        return isbn13
+    return _clean_isbn(row.get("ISBN"))
+
+
+def _row_title(row):
+    """Return the CSV title exactly, or Unknown when the cell is blank."""
+    title = row.get("Title")
+    if title is None or not str(title).strip():
+        return "Unknown"
+    return str(title)
+
+
+def _publication_year(row):
+    """Return Year Published, or Original Publication Year when that is empty."""
+    year = _parse_year(row.get("Year Published"))
+    if year is not None:
+        return year
+    return _parse_year(row.get("Original Publication Year"))
+
+
+def _parse_year(raw):
+    """Return a publication year, or None when the cell is not a whole number."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text.isnumeric():
+        return None
+    return int(text)
 
 
 def _custom_shelf_names(raw):
@@ -880,46 +602,3 @@ def _normalize_average(value):
     return (value * Decimal(100) / Decimal(GOODREADS_MAX_RATING)).quantize(
         Decimal("0.1"),
     )
-
-
-def _normalize_title(title):
-    """Lowercase a title and drop punctuation and series parentheses."""
-    text = unicodedata.normalize("NFKC", str(title or ""))
-    text = text.casefold()
-    text = re.sub(r"\([^)]*\)", " ", text)
-    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
-    text = text.replace("_", " ")
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _titles_match(left, right):
-    """Return whether two titles are the same work, not merely related.
-
-    A match is an equal or contained normalized title, a high
-    SequenceMatcher ratio, or a high token overlap. A clearly different
-    work, such as another book that only shares a word, does not match.
-    """
-    normalized_left = _normalize_title(left)
-    normalized_right = _normalize_title(right)
-    if not normalized_left or not normalized_right:
-        return False
-    if (
-        normalized_left == normalized_right
-        or normalized_left in normalized_right
-        or normalized_right in normalized_left
-    ):
-        return True
-    ratio = SequenceMatcher(None, normalized_left, normalized_right).ratio()
-    if ratio >= TITLE_MATCH_RATIO:
-        return True
-    left_tokens = normalized_left.split()
-    right_tokens = normalized_right.split()
-    shorter, longer = (
-        (left_tokens, set(right_tokens))
-        if len(left_tokens) <= len(right_tokens)
-        else (right_tokens, set(left_tokens))
-    )
-    if not shorter:
-        return False
-    overlap = sum(token in longer for token in shorter) / len(shorter)
-    return overlap >= TITLE_TOKEN_OVERLAP

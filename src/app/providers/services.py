@@ -15,6 +15,7 @@ from app.providers import (
     anilist,
     bgg,
     comicvine,
+    goodreads,
     hardcover,
     igdb,
     mal,
@@ -239,6 +240,9 @@ def get_media_metadata(
         if media_type == "tv_with_seasons":
             media_type = MediaTypes.TV.value
         return manual.metadata(media_id, media_type)
+
+    if source == Sources.GOODREADS.value:
+        return goodreads.book(media_id)
 
     metadata_retrievers = {
         MediaTypes.ANIME.value: lambda: (
