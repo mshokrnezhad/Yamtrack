@@ -115,6 +115,8 @@ class GoodReadsImporter:
         # Track existing media for "new" mode
         self.existing_media = helpers.get_existing_media(user)
         self._index_goodreads_books()
+        # source + media id -> Goodreads id, including rows earlier in this file.
+        self._index_claims()
 
         # Track existing media changed in "new" mode, by primary key
         self.to_update = defaultdict(dict)
@@ -212,6 +214,54 @@ class GoodReadsImporter:
             self._goodreads_items[rating.goodreads_id] = book.item
             self._books_by_goodreads.setdefault(rating.goodreads_id, book)
 
+    def _index_claims(self):
+        """Map each catalog item to the Goodreads id already stored on it."""
+        self._claims = {}
+        claimed = ItemRating.objects.exclude(goodreads_id="").values_list(
+            "item__source",
+            "item__media_id",
+            "goodreads_id",
+        )
+        for source, media_id, goodreads_id in claimed:
+            self._claims[_claim_key(source, media_id)] = goodreads_id
+
+    def _claim_owner(self, source, media_id):
+        """Return the Goodreads id that owns this item, or an empty string."""
+        key = _claim_key(source, media_id)
+        if key in self._claims:
+            return self._claims[key]
+        owner = (
+            ItemRating.objects.filter(
+                item__source=source,
+                item__media_id=str(media_id),
+                item__media_type=MediaTypes.BOOK.value,
+            )
+            .exclude(goodreads_id="")
+            .values_list("goodreads_id", flat=True)
+            .first()
+        )
+        self._claims[key] = owner or ""
+        return self._claims[key]
+
+    def _claimed_by_other(self, book, row):
+        """Return whether a different Goodreads id already uses this item."""
+        owner = self._claim_owner(book.get("source"), book.get("media_id"))
+        return bool(owner) and owner != self._book_id(row)
+
+    def _claim_item(self, source, media_id, book_id):
+        """Remember that this Goodreads id is using the item.
+
+        A later row in the same file consults this before its rating is saved.
+        An id already stored for a different book is left in place.
+        """
+        if not book_id:
+            return
+        key = _claim_key(source, media_id)
+        owner = self._claims.get(key)
+        if owner and owner != book_id:
+            return
+        self._claims[key] = book_id
+
     def _process_row(self, row):
         """Process a single row from the CSV file."""
         # Skip early (before hitting the provider) when the shelf can't be
@@ -237,30 +287,45 @@ class GoodReadsImporter:
         """Move a mismatched Goodreads id onto the resolved item.
 
         An ISBN hit whose catalog title is another language shares the media
-        id, so it is not treated as a mismatch. The old catalog item is left
-        unchanged: it may be a different work.
+        id, so it is not treated as a mismatch. Open Library and manual items
+        are retitled from the CSV instead of moved. The old catalog item is
+        left unchanged: it may be a different work.
         """
         stored = self._goodreads_items.get(self._book_id(row))
         if stored is None or _same_item(stored, book):
             return False
-        if _titles_match(row.get("Title"), stored.title):
+        if self._keep_stored(stored, row):
             return False
         self._move_user_book(stored, book, row)
         return True
+
+    def _keep_stored(self, stored, row):
+        """Return whether this Goodreads id should stay on its current item.
+
+        Open Library and manual items keep the CSV title, so a romanized
+        catalog title is not a reason to leave them. A Hardcover item stays
+        when its title still matches the CSV.
+        """
+        if stored.source in (Sources.OPENLIBRARY.value, Sources.MANUAL.value):
+            return True
+        return _titles_match(row.get("Title"), stored.title)
 
     def _reuse_matching_item(self, book, row):
         """Keep the item already imported for this Goodreads id."""
         stored = self._goodreads_items.get(self._book_id(row))
         if stored is None or _same_item(stored, book):
             return book
-        if not _titles_match(row.get("Title"), stored.title):
+        if not self._keep_stored(stored, row):
             return book
-        return {
-            "media_id": stored.media_id,
-            "source": stored.source,
-            "title": stored.title,
-            "image": stored.image,
-        }
+        return self._with_csv_title(
+            {
+                "media_id": stored.media_id,
+                "source": stored.source,
+                "title": stored.title,
+                "image": stored.image,
+            },
+            row,
+        )
 
     def _move_user_book(self, old_item, book, row):
         """Move this user's book, Goodreads fields, and lists onto ``book``."""
@@ -270,7 +335,9 @@ class GoodReadsImporter:
             self._move_rating(old_item, new_item)
             self._move_lists(old_item, new_item)
             moved = self._move_books(old_item, new_item, book_id)
-            self._store_goodreads(new_item, row)
+            if self._store_goodreads(new_item, row) is False:
+                return
+            self._retitle_from_csv(new_item, row)
             self._assign_custom_shelves(new_item, row)
 
         self.stats["repaired"] += 1
@@ -313,12 +380,16 @@ class GoodReadsImporter:
         for field in GOODREADS_RATING_FIELDS:
             setattr(new, field, getattr(old, field))
         new.save(update_fields=list(GOODREADS_RATING_FIELDS))
+        moved_id = old.goodreads_id
         old.goodreads_id = ""
         old.goodreads_value = None
         old.goodreads_normalized = None
         old.goodreads_ratings_count = None
         old.page_count = None
         old.save(update_fields=list(GOODREADS_RATING_FIELDS))
+        self._claims[_claim_key(old_item.source, old_item.media_id)] = ""
+        if moved_id:
+            self._claims[_claim_key(new_item.source, new_item.media_id)] = moved_id
 
     def _move_lists(self, old_item, new_item):
         """Move this user's shelf memberships onto the replacement item."""
@@ -342,13 +413,18 @@ class GoodReadsImporter:
         source = book["source"]
         media_id = str(book["media_id"])
         book_id = self._book_id(row)
+        # Claim before the rating row is saved so the next CSV row cannot
+        # take this item.
+        self._claim_item(source, media_id, book_id)
         existing = self._get_existing(media_id, source, book_id, row.get("Title"))
         if existing:
             item = existing.item
         else:
             item, _created = self._create_or_update_item(book)
 
-        self._store_goodreads(item, row)
+        if self._store_goodreads(item, row) is False:
+            return
+        self._retitle_from_csv(item, row)
         self._assign_custom_shelves(item, row)
 
         if existing:
@@ -393,16 +469,58 @@ class GoodReadsImporter:
         return book
 
     def _search_book(self, row, source=Sources.HARDCOVER):
-        """Resolve a row: Hardcover ISBN, Open Library ISBN, then titles.
+        """Resolve a row without letting two Goodreads ids share an item.
 
-        ISBN hits are trusted, including a catalog title in another language.
-        A title-only hit is kept only when it matches the CSV title. Otherwise
-        the row becomes a manual item so the book is still imported.
+        ISBN hits are trusted, including a Hardcover title in another language.
+        A title-only hit is kept only when it matches the CSV title. A catalog
+        item already used by a different Goodreads id is skipped: Hardcover
+        falls through to Open Library, and a claimed or missing Open Library
+        hit becomes a manual item. Open Library titles come from the CSV.
         """
         found = self._search_catalog(row, source)
-        if found is not None:
-            return found
+        if found is not None and not self._claimed_by_other(found, row):
+            return self._with_csv_title(found, row)
+        if found is not None and found.get("source") == Sources.HARDCOVER.value:
+            library = self._search_openlibrary(row)
+            if library is not None and not self._claimed_by_other(library, row):
+                return self._with_csv_title(library, row)
         return self._manual_book((row.get("Title") or "").strip())
+
+    def _search_openlibrary(self, row):
+        """Search Open Library by ISBN, then by title."""
+        providers = [Sources.OPENLIBRARY]
+        isbn = _clean_isbn(row.get("ISBN13"))
+        title = (row.get("Title") or "").strip()
+        if isbn:
+            hit = self._isbn_hit(isbn, providers)
+            if hit is not None:
+                return hit
+        if not title:
+            return None
+        author = (row.get("Author") or "").strip()
+        return self._title_hit(title, author, providers)
+
+    def _with_csv_title(self, book, row):
+        """Use the CSV title for Open Library and manual items."""
+        if book.get("source") not in (
+            Sources.OPENLIBRARY.value,
+            Sources.MANUAL.value,
+        ):
+            return book
+        title = (row.get("Title") or "").strip()
+        if title:
+            book["title"] = title
+        return book
+
+    def _retitle_from_csv(self, item, row):
+        """Store the CSV title on an Open Library or manual item."""
+        if item.source not in (Sources.OPENLIBRARY.value, Sources.MANUAL.value):
+            return
+        title = (row.get("Title") or "").strip()
+        if not title or item.title == title:
+            return
+        item.title = title
+        item.save(update_fields=["title"])
 
     def _search_catalog(self, row, source):
         """Search catalogs. None means the caller should create a manual item."""
@@ -514,19 +632,26 @@ class GoodReadsImporter:
         return _parse_count(raw)
 
     def _store_goodreads(self, item, row):
-        """Save the Goodreads id, community average, rating count, and pages."""
+        """Save the Goodreads id, community average, rating count, and pages.
+
+        Return False when another Goodreads id already owns the item, so the
+        caller does not add shelves or a book onto it.
+        """
         book_id = self._book_id(row)
         average = _parse_average_rating(row.get("Average Rating"))
         pages = self._parse_pages(row.get("Number of Pages"))
         count = _row_ratings_count(row)
         if not book_id and average is None and pages is None and count is None:
-            return
+            return True
 
         rating, _created = ItemRating.objects.get_or_create(item=item)
         fields = []
+        if book_id and rating.goodreads_id and rating.goodreads_id != book_id:
+            return False
         if book_id:
             rating.goodreads_id = book_id
             fields.append("goodreads_id")
+            self._claim_item(item.source, item.media_id, book_id)
         if average is not None:
             rating.goodreads_value = average
             rating.goodreads_normalized = _normalize_average(average)
@@ -539,6 +664,7 @@ class GoodReadsImporter:
             fields.append("page_count")
         if fields:
             rating.save(update_fields=fields)
+        return True
 
     def _assign_custom_shelves(self, item, row):
         """Add the book to one list per shelf that is not an exclusive status."""
@@ -677,6 +803,11 @@ def _same_item(item, book):
     return item.source == book.get("source") and item.media_id == str(
         book.get("media_id"),
     )
+
+
+def _claim_key(source, media_id):
+    """Return the in-memory key for one catalog item."""
+    return (source, str(media_id))
 
 
 def _rating_or_none(item):

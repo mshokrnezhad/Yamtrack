@@ -618,7 +618,7 @@ class ImportGoodreadsFallbacks(TestCase):
 
     @patch("integrations.imports.goodreads.services.search")
     def test_openlibrary_isbn_when_hardcover_misses(self, search):
-        """Open Library's ISBN hit is used, including a translated title."""
+        """Open Library keeps the hit, and the stored title is the CSV title."""
 
         def search_books(_media_type, query, _page, source):
             if source == Sources.HARDCOVER.value:
@@ -643,7 +643,8 @@ class ImportGoodreadsFallbacks(TestCase):
         item = Item.objects.get()
         self.assertEqual(item.source, Sources.OPENLIBRARY.value)
         self.assertEqual(item.media_id, "OL1M")
-        self.assertEqual(item.title, "Le Nom du vent")
+        self.assertEqual(item.title, "The Name of the Wind")
+        self.assertEqual(item.image, "http://example.com/a.jpg")
 
     @patch("integrations.imports.goodreads.services.search")
     def test_rejects_a_different_title_and_uses_openlibrary(self, search):
@@ -813,6 +814,394 @@ class ImportGoodreadsFallbacks(TestCase):
         self.assertTrue(shelf.items.filter(pk=book.item_id).exists())
         self.assertTrue(other_shelf.items.filter(pk=wrong.pk).exists())
         self.assertFalse(Item.objects.filter(media_id="999").exists())
+
+    @patch("integrations.imports.goodreads.services.search")
+    def test_openlibrary_stores_the_csv_title(self, search):
+        """An Open Library hit keeps its id and image, not the catalog title."""
+
+        def search_books(_media_type, query, _page, source):
+            if source == Sources.HARDCOVER.value:
+                return {"results": []}
+            if query == "9780000000001":
+                return {
+                    "results": [
+                        _catalog_hit("OL-inv", "Vārūnigī", source),
+                    ],
+                }
+            if query == "مارادونا":
+                return {
+                    "results": [
+                        _catalog_hit("OL-mar", "أرملة الشهيد مارادونا", source),
+                    ],
+                }
+            return {"results": []}
+
+        search.side_effect = search_books
+        rows = [
+            _row(
+                Title="وارونگی",
+                ISBN13='="9780000000001"',
+                **{"Book Id": "501"},
+            ),
+            _row(
+                Title="مارادونا",
+                ISBN13='=""',
+                **{"Book Id": "502"},
+            ),
+        ]
+
+        goodreads.importer(_csv_file(rows), self.user, "new")
+
+        inversion = Item.objects.get(public_rating__goodreads_id="501")
+        maradona = Item.objects.get(public_rating__goodreads_id="502")
+        self.assertEqual(inversion.source, Sources.OPENLIBRARY.value)
+        self.assertEqual(inversion.media_id, "OL-inv")
+        self.assertEqual(inversion.title, "وارونگی")
+        self.assertEqual(inversion.image, "http://example.com/a.jpg")
+        self.assertEqual(maradona.source, Sources.OPENLIBRARY.value)
+        self.assertEqual(maradona.media_id, "OL-mar")
+        self.assertEqual(maradona.title, "مارادونا")
+        self.assertEqual(maradona.image, "http://example.com/a.jpg")
+        self.assertFalse(Item.objects.filter(title="Vārūnigī").exists())
+        self.assertFalse(Item.objects.filter(title="أرملة الشهيد مارادونا").exists())
+
+    @patch("integrations.imports.goodreads.services.search")
+    def test_reimport_retitles_openlibrary_not_hardcover(self, search):
+        """A later import fixes an Open Library title and leaves Hardcover."""
+        library = Item.objects.create(
+            media_id="OL-inv",
+            source=Sources.OPENLIBRARY.value,
+            media_type=MediaTypes.BOOK.value,
+            title="Vārūnigī",
+            image="http://example.com/ol.jpg",
+        )
+        ItemRating.objects.create(item=library, goodreads_id="501", page_count=12)
+        Book.objects.create(
+            item=library,
+            user=self.user,
+            status=Status.PLANNING.value,
+        )
+        hardcover = Item.objects.create(
+            media_id="hc-fr",
+            source=Sources.HARDCOVER.value,
+            media_type=MediaTypes.BOOK.value,
+            title="Le Nom du vent",
+            image="http://example.com/hc.jpg",
+        )
+        ItemRating.objects.create(item=hardcover, goodreads_id="1")
+        Book.objects.create(
+            item=hardcover,
+            user=self.user,
+            status=Status.PLANNING.value,
+        )
+
+        def search_books(_media_type, query, _page, source):
+            if query == "9780000000001" and source == Sources.OPENLIBRARY.value:
+                return {
+                    "results": [
+                        _catalog_hit("OL-inv", "Vārūnigī", source),
+                    ],
+                }
+            if query == "9780756404741" and source == Sources.HARDCOVER.value:
+                return {
+                    "results": [
+                        _catalog_hit("hc-fr", "Le Nom du vent", source),
+                    ],
+                }
+            return {"results": []}
+
+        search.side_effect = search_books
+        rows = [
+            _row(
+                Title="وارونگی",
+                ISBN13='="9780000000001"',
+                **{"Book Id": "501"},
+            ),
+            _row(
+                Title="The Name of the Wind",
+                ISBN13='="9780756404741"',
+                **{"Book Id": "1"},
+            ),
+        ]
+
+        goodreads.importer(_csv_file(rows), self.user, "new")
+
+        library.refresh_from_db()
+        hardcover.refresh_from_db()
+        self.assertEqual(library.title, "وارونگی")
+        self.assertEqual(library.media_id, "OL-inv")
+        self.assertEqual(library.source, Sources.OPENLIBRARY.value)
+        self.assertEqual(library.image, "http://example.com/ol.jpg")
+        self.assertEqual(library.public_rating.goodreads_id, "501")
+        self.assertEqual(hardcover.title, "Le Nom du vent")
+        self.assertEqual(hardcover.image, "http://example.com/hc.jpg")
+        self.assertEqual(hardcover.public_rating.goodreads_id, "1")
+        self.assertEqual(Item.objects.count(), 2)
+        self.assertEqual(Book.objects.filter(user=self.user).count(), 2)
+
+    @patch("integrations.imports.goodreads.services.search")
+    def test_second_goodreads_id_falls_through_to_openlibrary(self, search):
+        """A taken Hardcover hit is not shared; an unclaimed Open Library hit is."""
+
+        def search_books(_media_type, _query, _page, source):
+            if source == Sources.HARDCOVER.value:
+                return {
+                    "results": [
+                        _catalog_hit("hc-shared", "Shared Work", source),
+                    ],
+                }
+            return {
+                "results": [
+                    _catalog_hit("OL-second", "Catalog Edition", source),
+                ],
+            }
+
+        search.side_effect = search_books
+        rows = [
+            _row(
+                Title="First Edition",
+                ISBN13='="9781111111111"',
+                Bookshelves="alpha",
+                **{
+                    "Book Id": "111",
+                    "Average Rating": "4.00",
+                    "Number of Pages": "100",
+                    "Exclusive Shelf": "read",
+                    "My Rating": "5",
+                },
+            ),
+            _row(
+                Title="Second Edition",
+                ISBN13='="9782222222222"',
+                Bookshelves="beta",
+                **{
+                    "Book Id": "222",
+                    "Average Rating": "3.50",
+                    "Number of Pages": "80",
+                    "Exclusive Shelf": "to-read",
+                },
+            ),
+        ]
+
+        goodreads.importer(_csv_file(rows), self.user, "new")
+
+        first = Item.objects.get(public_rating__goodreads_id="111")
+        second = Item.objects.get(public_rating__goodreads_id="222")
+        self.assertEqual(first.source, Sources.HARDCOVER.value)
+        self.assertEqual(first.media_id, "hc-shared")
+        self.assertEqual(first.title, "Shared Work")
+        self.assertEqual(first.public_rating.goodreads_value, Decimal("4.00"))
+        self.assertEqual(first.public_rating.page_count, 100)
+        self.assertEqual(second.source, Sources.OPENLIBRARY.value)
+        self.assertEqual(second.media_id, "OL-second")
+        self.assertEqual(second.title, "Second Edition")
+        self.assertEqual(second.image, "http://example.com/a.jpg")
+        self.assertEqual(second.public_rating.goodreads_value, Decimal("3.50"))
+        self.assertEqual(second.public_rating.page_count, 80)
+        self.assertEqual(
+            Book.objects.get(item=first).status,
+            Status.COMPLETED.value,
+        )
+        self.assertEqual(
+            Book.objects.get(item=second).status,
+            Status.PLANNING.value,
+        )
+        alpha = CustomList.objects.get(owner=self.user, name="alpha")
+        beta = CustomList.objects.get(owner=self.user, name="beta")
+        self.assertTrue(alpha.items.filter(pk=first.pk).exists())
+        self.assertFalse(alpha.items.filter(pk=second.pk).exists())
+        self.assertTrue(beta.items.filter(pk=second.pk).exists())
+        self.assertFalse(beta.items.filter(pk=first.pk).exists())
+
+        stats = {"updated": 0, "missing": 0, "repaired": 0, "created": 0}
+        goodreads._apply_ratings(
+            [
+                {"book_id": "111", "average": "4.10", "ratings_count": "10"},
+                {"book_id": "222", "average": "3.20", "ratings_count": "8"},
+            ],
+            stats,
+        )
+        self.assertEqual(stats["updated"], 2)
+        self.assertEqual(stats["missing"], 0)
+        first.public_rating.refresh_from_db()
+        second.public_rating.refresh_from_db()
+        self.assertEqual(first.public_rating.goodreads_id, "111")
+        self.assertEqual(first.public_rating.goodreads_value, Decimal("4.10"))
+        self.assertEqual(second.public_rating.goodreads_value, Decimal("3.20"))
+
+    @patch("integrations.imports.goodreads.services.search")
+    def test_second_goodreads_id_is_manual_when_catalog_is_taken(self, search):
+        """A claimed Open Library hit also yields a manual item with the CSV title."""
+        taken = Item.objects.create(
+            media_id="OL-taken",
+            source=Sources.OPENLIBRARY.value,
+            media_type=MediaTypes.BOOK.value,
+            title="Already Taken",
+            image="http://example.com/ol.jpg",
+        )
+        ItemRating.objects.create(
+            item=taken,
+            goodreads_id="999",
+            goodreads_value=Decimal("2.00"),
+            page_count=5,
+        )
+
+        def search_books(_media_type, _query, _page, source):
+            if source == Sources.HARDCOVER.value:
+                return {
+                    "results": [
+                        _catalog_hit("hc-shared", "Shared Work", source),
+                    ],
+                }
+            return {
+                "results": [
+                    _catalog_hit("OL-taken", "Already Taken", source),
+                ],
+            }
+
+        search.side_effect = search_books
+        rows = [
+            _row(
+                Title="First Edition",
+                ISBN13='="9781111111111"',
+                **{
+                    "Book Id": "111",
+                    "Average Rating": "4.00",
+                    "Number of Pages": "100",
+                },
+            ),
+            _row(
+                Title="Second Edition",
+                ISBN13='="9782222222222"',
+                **{
+                    "Book Id": "222",
+                    "Average Rating": "3.50",
+                    "Number of Pages": "80",
+                },
+            ),
+        ]
+
+        goodreads.importer(_csv_file(rows), self.user, "new")
+
+        first = Item.objects.get(public_rating__goodreads_id="111")
+        second = Item.objects.get(public_rating__goodreads_id="222")
+        taken.refresh_from_db()
+        self.assertEqual(first.source, Sources.HARDCOVER.value)
+        self.assertEqual(first.public_rating.goodreads_value, Decimal("4.00"))
+        self.assertEqual(first.public_rating.page_count, 100)
+        self.assertEqual(second.source, Sources.MANUAL.value)
+        self.assertEqual(second.title, "Second Edition")
+        self.assertEqual(second.image, settings.IMG_NONE)
+        self.assertEqual(second.public_rating.page_count, 80)
+        self.assertEqual(taken.public_rating.goodreads_id, "999")
+        self.assertEqual(taken.public_rating.goodreads_value, Decimal("2.00"))
+        self.assertEqual(taken.public_rating.page_count, 5)
+        self.assertEqual(taken.title, "Already Taken")
+        self.assertEqual(Book.objects.filter(user=self.user).count(), 2)
+
+    @patch("integrations.imports.goodreads.services.search")
+    def test_second_import_reuses_the_same_goodreads_id(self, search):
+        """New mode does not create another item for a Goodreads id already stored."""
+        search.return_value = {
+            "results": [
+                _catalog_hit("hc-1", "Le Nom du vent", Sources.HARDCOVER.value),
+            ],
+        }
+        row = _row(
+            Title="The Name of the Wind",
+            ISBN13='="9780756404741"',
+            **{"Book Id": "1"},
+        )
+        payload = _csv_file([row])
+
+        goodreads.importer(payload, self.user, "new")
+        payload.seek(0)
+        goodreads.importer(payload, self.user, "new")
+
+        self.assertEqual(Item.objects.count(), 1)
+        self.assertEqual(Book.objects.filter(user=self.user).count(), 1)
+        item = Item.objects.get()
+        self.assertEqual(item.source, Sources.HARDCOVER.value)
+        self.assertEqual(item.media_id, "hc-1")
+        self.assertEqual(item.title, "Le Nom du vent")
+        self.assertEqual(item.public_rating.goodreads_id, "1")
+
+    @patch("integrations.imports.goodreads.services.search")
+    def test_later_import_splits_a_merged_goodreads_id(self, search):
+        """A row that resolves to someone else's item gets its own manual item."""
+        shared = Item.objects.create(
+            media_id="hc-shared",
+            source=Sources.HARDCOVER.value,
+            media_type=MediaTypes.BOOK.value,
+            title="Shared Work",
+            image="http://example.com/hc.jpg",
+        )
+        ItemRating.objects.create(
+            item=shared,
+            goodreads_id="111",
+            goodreads_value=Decimal("4.00"),
+            page_count=100,
+        )
+        book = Book.objects.create(
+            item=shared,
+            user=self.user,
+            status=Status.PLANNING.value,
+        )
+        Book.objects.filter(pk=book.pk).update(
+            status=Status.COMPLETED.value,
+            progress=100,
+        )
+        shelf = CustomList.objects.create(owner=self.user, name="alpha")
+        shelf.items.add(shared)
+
+        def search_books(_media_type, _query, _page, source):
+            if source == Sources.HARDCOVER.value:
+                return {
+                    "results": [
+                        _catalog_hit("hc-shared", "Shared Work", source),
+                    ],
+                }
+            return {"results": []}
+
+        search.side_effect = search_books
+        row = _row(
+            Title="Other Volume",
+            ISBN13='="9782222222222"',
+            Bookshelves="beta",
+            **{
+                "Book Id": "222",
+                "Average Rating": "3.10",
+                "Number of Pages": "40",
+                "Exclusive Shelf": "to-read",
+            },
+        )
+
+        goodreads.importer(_csv_file([row]), self.user, "new")
+
+        shared.refresh_from_db()
+        book.refresh_from_db()
+        self.assertEqual(shared.title, "Shared Work")
+        self.assertEqual(shared.image, "http://example.com/hc.jpg")
+        self.assertEqual(shared.public_rating.goodreads_id, "111")
+        self.assertEqual(shared.public_rating.goodreads_value, Decimal("4.00"))
+        self.assertEqual(shared.public_rating.page_count, 100)
+        self.assertEqual(book.item_id, shared.id)
+        self.assertEqual(book.status, Status.COMPLETED.value)
+        self.assertEqual(book.progress, 100)
+        self.assertTrue(shelf.items.filter(pk=shared.pk).exists())
+
+        other = Item.objects.get(public_rating__goodreads_id="222")
+        self.assertEqual(other.source, Sources.MANUAL.value)
+        self.assertEqual(other.title, "Other Volume")
+        self.assertEqual(other.image, settings.IMG_NONE)
+        self.assertEqual(other.public_rating.goodreads_value, Decimal("3.10"))
+        self.assertEqual(other.public_rating.page_count, 40)
+        beta = CustomList.objects.get(owner=self.user, name="beta")
+        self.assertTrue(beta.items.filter(pk=other.pk).exists())
+        self.assertFalse(beta.items.filter(pk=shared.pk).exists())
+        self.assertFalse(shelf.items.filter(pk=other.pk).exists())
+        tracked = Book.objects.get(user=self.user, item=other)
+        self.assertEqual(tracked.status, Status.PLANNING.value)
 
 
 class GoodreadsCommands(TestCase):
