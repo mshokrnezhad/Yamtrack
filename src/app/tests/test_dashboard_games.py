@@ -41,7 +41,7 @@ METADATA = {
 
 
 class DashboardChooserTests(TestCase):
-    """The landing page and the split between the two dashboards."""
+    """The landing page and the split between the dashboards."""
 
     def setUp(self):
         """Log in a user."""
@@ -51,7 +51,7 @@ class DashboardChooserTests(TestCase):
         )
         self.client.login(username="chooser", password="test-pass")  # noqa: S106
 
-    def test_chooser_links_to_both_dashboards(self):
+    def test_chooser_links_to_each_dashboard(self):
         """GET /dashboard is the tile page, and / still redirects there."""
         response = self.client.get(reverse("dashboard"))
 
@@ -59,9 +59,11 @@ class DashboardChooserTests(TestCase):
         self.assertTemplateUsed(response, "app/dashboard_home.html")
         self.assertContains(response, f'href="{reverse("dashboard_movies_tv")}"')
         self.assertContains(response, f'href="{reverse("dashboard_games")}"')
+        self.assertContains(response, f'href="{reverse("dashboard_books")}"')
         self.assertContains(response, "Movies &amp; TV")
         self.assertNotContains(response, "Movies & TV")
         self.assertContains(response, "Games")
+        self.assertContains(response, "Books")
 
         root = self.client.get("/")
 

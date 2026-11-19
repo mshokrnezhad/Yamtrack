@@ -19,6 +19,11 @@
         {% trans "Games" as label %}
         <span class="dashboard-choice-label">{{ label|force_escape }}</span>
       </a>
+      <a class="dashboard-choice" href="{% url 'dashboard_books' %}">
+        {% include "app/icons/book-open.svg" with classes="dashboard-choice-icon" %}
+        {% trans "Books" as label %}
+        <span class="dashboard-choice-label">{{ label|force_escape }}</span>
+      </a>
     </div>
   </div>
 {% endblock content %}

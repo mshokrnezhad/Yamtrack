@@ -220,11 +220,12 @@ class Item(CalendarTriggerMixin, models.Model):
 
 
 class ItemRating(models.Model):
-    """Public scores for a movie, TV show, or anime.
+    """Public scores for a media item.
 
     Each source keeps its raw value and a 0-100 normalization. Missing data
     stays NULL. ``ratings_updated_at`` is the last external fetch; editing
-    Letterboxd does not change it.
+    Letterboxd does not change it. Goodreads fields come from the CSV import.
+    They are separate from the IGDB critic score in the Metacritic fields.
     """
 
     item = models.OneToOneField(
@@ -294,6 +295,20 @@ class ItemRating(models.Model):
         max_digits=5,
         decimal_places=1,
     )
+    goodreads_id = models.CharField(max_length=32, blank=True, default="")
+    goodreads_value = models.DecimalField(
+        null=True,
+        blank=True,
+        max_digits=4,
+        decimal_places=2,
+    )
+    goodreads_normalized = models.DecimalField(
+        null=True,
+        blank=True,
+        max_digits=5,
+        decimal_places=1,
+    )
+    page_count = models.PositiveIntegerField(null=True, blank=True)
     ratings_updated_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):

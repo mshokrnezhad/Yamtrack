@@ -21,6 +21,7 @@ from simple_history.utils import bulk_update_with_history
 
 from app.models import (
     TV,
+    Book,
     Episode,
     Game,
     Item,
@@ -46,6 +47,12 @@ REFRESH_COOLDOWN = 60
 FINISHED_TMDB_STATUSES = frozenset({"Ended", "Canceled"})
 _UNSET = object()
 _PLAYING = (Status.IN_PROGRESS.value, Status.PAUSED.value)
+_UNREAD = (
+    Status.IN_PROGRESS.value,
+    Status.PAUSED.value,
+    Status.PLANNING.value,
+    Status.DROPPED.value,
+)
 _OWNED = (
     Status.IN_PROGRESS.value,
     Status.PAUSED.value,
@@ -65,6 +72,17 @@ _GAME_ROWS = {
     "best-owned-xbox": ("best", XBOX_LIST),
     "best-owned-switch": ("best", SWITCH_LIST),
 }
+CURRENTLY_READING_KEY = "currently-reading"
+BOOK_TAG_PREFIX = "book-tag-"
+# Exclusive Goodreads shelves are a status. Keep in step with the importer.
+EXCLUSIVE_SHELVES = frozenset(
+    {
+        "read",
+        "currently-reading",
+        "to-read",
+        "did-not-finish",
+    },
+)
 _EMPTY = {
     "continue-watching": _("No shows in progress."),
     "new-episodes": _("No new episodes."),
@@ -72,6 +90,7 @@ _EMPTY = {
     "continue-playing-switch": _("No games in progress."),
     "best-owned-xbox": _("No unfinished owned games."),
     "best-owned-switch": _("No unfinished owned games."),
+    CURRENTLY_READING_KEY: _("No books in progress."),
 }
 
 
@@ -146,14 +165,23 @@ def build_game_rows(user):
     ]
 
 
+def build_book_rows(user):
+    """Return Currently reading, then one row per custom book tag."""
+    rows = [_currently_reading_row(user)]
+    rows.extend(
+        _book_tag_row(user, custom_list) for custom_list in _book_tag_lists(user)
+    )
+    return rows
+
+
 def row_page(user, key, page):
     """Return one page of the same ordered items as that dashboard row."""
-    if key not in _ROWS and key not in _GAME_ROWS:
+    if key not in _ROWS and key not in _GAME_ROWS and not _book_row_exists(user, key):
         return None
     records, has_next, number = _slice_page(_ordered(user, key), page)
     return {
         "key": key,
-        "title": _title(key),
+        "title": _row_title(user, key),
         "media_type": _row_media_type(key),
         "entries": _cards(user, key, records),
         "has_next": has_next,
@@ -168,6 +196,8 @@ def _ordered(user, key, *, downloaded=_UNSET):
 
     The dashboard row and its See all page both call this.
     """
+    if _is_book_key(key):
+        return _ordered_books(user, key)
     if key in _GAME_ROWS:
         return _ordered_games(user, key)
     kind, media_type = _ROWS[key]
@@ -273,6 +303,10 @@ def _planning_entries(user, media_type):
 
 def _cards(user, key, records):
     """Turn an ordered slice into the cards both views render."""
+    if key == CURRENTLY_READING_KEY:
+        return _reading_cards(records)
+    if key.startswith(BOOK_TAG_PREFIX):
+        return _tag_cards(user, records)
     if key in _GAME_ROWS:
         return _game_cards(user, key, records)
     kind, media_type = _ROWS[key]
@@ -581,6 +615,8 @@ def _whole_score(value):
 
 def _row_media_type(key):
     """Return the media type a See all page renders."""
+    if key == CURRENTLY_READING_KEY or key.startswith(BOOK_TAG_PREFIX):
+        return MediaTypes.BOOK.value
     if key in _GAME_ROWS:
         return MediaTypes.GAME.value
     return _ROWS[key][1]
@@ -588,9 +624,187 @@ def _row_media_type(key):
 
 def _row_dashboard(key):
     """Return the dashboard a See all page links back to."""
+    if key == CURRENTLY_READING_KEY or key.startswith(BOOK_TAG_PREFIX):
+        return "dashboard_books"
     if key in _GAME_ROWS:
         return "dashboard_games"
     return "dashboard_movies_tv"
+
+
+def _row_title(user, key):
+    """Return the heading for a dashboard row."""
+    if key == CURRENTLY_READING_KEY:
+        return _("Currently reading")
+    if key.startswith(BOOK_TAG_PREFIX):
+        custom_list = _tag_list(user, key)
+        if custom_list is None:
+            return ""
+        return custom_list.name
+    return _title(key)
+
+
+def _book_row_exists(user, key):
+    """Return whether this key is a book row for the user."""
+    if key == CURRENTLY_READING_KEY:
+        return True
+    return _tag_list(user, key) is not None
+
+
+def _is_book_key(key):
+    """Return whether this route key belongs to the books dashboard."""
+    return key == CURRENTLY_READING_KEY or key.startswith(BOOK_TAG_PREFIX)
+
+
+def _ordered_books(user, key):
+    """Return the ordered books for a row. See all uses the same queryset."""
+    if key == CURRENTLY_READING_KEY:
+        return _currently_reading(user)
+    return _tag_books(user, _tag_list(user, key))
+
+
+def _book_tag_lists(user):
+    """Return book lists that are not exclusive Goodreads shelves."""
+    return (
+        CustomList.objects.filter(
+            owner=user,
+            items__media_type=MediaTypes.BOOK.value,
+        )
+        .exclude(name__in=EXCLUSIVE_SHELVES)
+        .distinct()
+        .order_by("name", "id")
+    )
+
+
+def _currently_reading_row(user):
+    """In-progress books, most recently progressed first."""
+    books = list(_currently_reading(user)[:ROW_LIMIT])
+    return {
+        "title": _("Currently reading"),
+        "see_all": reverse("dashboard_row", args=[CURRENTLY_READING_KEY]),
+        "media_type": MediaTypes.BOOK.value,
+        "media": _reading_cards(books),
+        "empty": _EMPTY[CURRENTLY_READING_KEY],
+    }
+
+
+def _book_tag_row(user, custom_list):
+    """Unread books on one custom shelf, highest Goodreads average first."""
+    key = f"{BOOK_TAG_PREFIX}{custom_list.id}"
+    items = list(_tag_books(user, custom_list)[:ROW_LIMIT])
+    return {
+        "title": custom_list.name,
+        "see_all": reverse("dashboard_row", args=[key]),
+        "media_type": MediaTypes.BOOK.value,
+        "media": _tag_cards(user, items),
+    }
+
+
+def _currently_reading(user):
+    """In-progress books, newest progress, then history, then title.
+
+    Not sorted by rating. ``progressed_at`` is when the page count last changed.
+    """
+    activity = Subquery(
+        Book.history.model.objects.filter(id=OuterRef("pk"))
+        .order_by("-history_date")
+        .values("history_date")[:1],
+    )
+    return (
+        _latest(Book.objects.filter(user=user))
+        .filter(status=Status.IN_PROGRESS.value)
+        .annotate(
+            latest_activity=activity,
+            stored_pages=F("item__public_rating__page_count"),
+        )
+        .select_related("item")
+        .order_by(
+            F("progressed_at").desc(nulls_last=True),
+            F("latest_activity").desc(nulls_last=True),
+            Lower("item__title"),
+        )
+    )
+
+
+def _reading_cards(books):
+    """Show pages read against the imported page count."""
+    for book in books:
+        book.max_progress = book.stored_pages
+    return books
+
+
+def _tag_books(user, custom_list):
+    """Books on this list that are not completed, highest average first."""
+    if custom_list is None:
+        return Item.objects.none()
+    latest_status = Subquery(
+        Book.objects.filter(user=user, item_id=OuterRef("pk"))
+        .order_by("-created_at")
+        .values("status")[:1],
+    )
+    return (
+        Item.objects.filter(
+            custom_lists=custom_list,
+            media_type=MediaTypes.BOOK.value,
+        )
+        .annotate(
+            latest_status=latest_status,
+            goodreads_average=F("public_rating__goodreads_value"),
+        )
+        .filter(Q(latest_status__isnull=True) | Q(latest_status__in=_UNREAD))
+        .order_by(F("goodreads_average").desc(nulls_last=True), Lower("title"))
+    )
+
+
+def _tag_cards(user, items):
+    """Pair each book with its newest tracking row and the Goodreads average."""
+    if not items:
+        return []
+    tracked = {}
+    item_ids = [item.id for item in items]
+    if item_ids:
+        queryset = _latest(
+            Book.objects.filter(user=user, item_id__in=item_ids),
+        ).select_related("item")
+        tracked = {entry.item_id: entry for entry in queryset}
+    media = []
+    for item in items:
+        # The Item relation is already named public_rating, so the annotation
+        # uses another name and the card attribute is set here.
+        score = item.goodreads_average
+        entry = tracked.get(item.id)
+        if entry is None:
+            entry = _ListedMedia(item, score)
+        else:
+            entry.public_rating = score
+        media.append(entry)
+    return media
+
+
+def _tag_list(user, key):
+    """Return this user's book tag list for a row key, if it is one."""
+    list_id = _tag_list_id(key)
+    if list_id is None:
+        return None
+    custom_list = (
+        CustomList.objects.filter(pk=list_id, owner=user)
+        .exclude(name__in=EXCLUSIVE_SHELVES)
+        .first()
+    )
+    if custom_list is None:
+        return None
+    if not custom_list.items.filter(media_type=MediaTypes.BOOK.value).exists():
+        return None
+    return custom_list
+
+
+def _tag_list_id(key):
+    """Return the custom list id encoded in a book tag row key."""
+    if not key.startswith(BOOK_TAG_PREFIX):
+        return None
+    raw = key.removeprefix(BOOK_TAG_PREFIX)
+    if not raw.isdecimal():
+        return None
+    return int(raw)
 
 
 def _by_public_score(queryset, title_field, score_field="public_rating"):

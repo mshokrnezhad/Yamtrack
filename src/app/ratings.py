@@ -29,6 +29,7 @@ EMPTY_RATING = "\u2013"
 WEIGHT_MAX = 10
 NORMALIZED_MAX = Decimal(100)
 ONE_PLACE = Decimal("0.1")
+TWO_PLACES = Decimal("0.01")
 RATINGS_MAX_AGE = timedelta(days=7)
 OMDB_FAILURE_LIMIT = 5
 RATED_MEDIA_TYPES = (
@@ -124,10 +125,11 @@ def format_public_value(value):
     """Format a score. Missing values are an en dash, never ``0``."""
     if value is None:
         return EMPTY_RATING
-    text = format(Decimal(str(value)).quantize(ONE_PLACE), "f")
-    if text.endswith(".0"):
-        return text[:-2]
-    return text
+    # Keep a Goodreads tenth (4.29). Whole numbers still drop the decimal.
+    text = format(Decimal(str(value)).quantize(TWO_PLACES), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def format_source_value(value, suffix):

@@ -110,6 +110,7 @@ class RatingMathTests(TestCase):
         self.assertEqual(format_public_value(Decimal(0)), "0")
         self.assertEqual(format_public_value(Decimal("82.0")), "82")
         self.assertEqual(format_public_value(Decimal("8.5")), "8.5")
+        self.assertEqual(format_public_value(Decimal("4.29")), "4.29")
 
     def test_sort_labels_keep_their_stored_keys(self):
         """The visible names change, and the stored sort values do not."""

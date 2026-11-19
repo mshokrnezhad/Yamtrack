@@ -1,5 +1,6 @@
 from csv import DictReader, DictWriter
 from datetime import date
+from decimal import Decimal
 from io import BytesIO, StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -12,6 +13,7 @@ from django.utils import timezone
 from app.models import (
     Book,
     Item,
+    ItemRating,
     MediaTypes,
     Sources,
     Status,
@@ -20,6 +22,7 @@ from app.providers import services
 from integrations.imports import (
     goodreads,
 )
+from lists.models import CustomList
 
 mock_path = Path(__file__).resolve().parent.parent / "mock_data"
 app_mock_path = (
@@ -60,6 +63,22 @@ class ImportGoodreads(TestCase):
         """Test a modern decimal rating ("5.0") maps to the 0-10 scale."""
         read_book = Book.objects.get(status=Status.COMPLETED.value)
         self.assertEqual(read_book.score, 10)
+
+    def test_stores_goodreads_fields_from_the_mock_file(self):
+        """The sample export stores id, average, and pages, and no shelf lists."""
+        ghosts = Item.objects.get(public_rating__goodreads_id="28825810")
+        self.assertEqual(ghosts.public_rating.goodreads_value, Decimal("4.29"))
+        self.assertEqual(ghosts.public_rating.goodreads_normalized, Decimal("85.8"))
+        self.assertEqual(ghosts.public_rating.page_count, 90)
+        self.assertIsNone(ghosts.public_rating.metacritic_value)
+
+        wise = Item.objects.get(public_rating__goodreads_id="1215032")
+        self.assertEqual(wise.public_rating.goodreads_value, Decimal("4.55"))
+        self.assertEqual(wise.public_rating.page_count, 994)
+        sand = Item.objects.get(public_rating__goodreads_id="39298848")
+        self.assertEqual(sand.public_rating.goodreads_value, Decimal("3.64"))
+        self.assertEqual(sand.public_rating.page_count, 160)
+        self.assertFalse(CustomList.objects.filter(owner=self.user).exists())
 
 
 class ImportGoodreadsMultilineNotes(TestCase):
@@ -267,3 +286,253 @@ class ImportGoodreadsNewMode(TestCase):
         self.assertEqual(book.status, Status.PAUSED.value)
         self.assertEqual(book.score, 5)
         self.assertIsNone(book.end_date)
+
+
+def _csv_file(rows, fieldnames=None):
+    """Build an in-memory Goodreads CSV."""
+    if fieldnames is None:
+        fieldnames = list(rows[0])
+    buffer = StringIO(newline="")
+    writer = DictWriter(buffer, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return BytesIO(buffer.getvalue().encode())
+
+
+def _row(**fields):
+    """Return one Goodreads row, with the columns the importer reads."""
+    base = {
+        "Book Id": "1",
+        "Title": "Sample",
+        "ISBN13": '=""',
+        "My Rating": "0",
+        "Average Rating": "4.29",
+        "Number of Pages": "100",
+        "Date Read": "",
+        "Date Added": "2024/01/01",
+        "Bookshelves": "",
+        "Exclusive Shelf": "to-read",
+        "Private Notes": "",
+    }
+    base.update(fields)
+    return base
+
+
+class CleanIsbn(TestCase):
+    """Excel formula wrapping around ISBN cells."""
+
+    def test_strips_formula_wrapping(self):
+        """Wrapped, empty, and plain ISBNs become a bare value or nothing."""
+        self.assertEqual(goodreads._clean_isbn('="9789644480645"'), "9789644480645")
+        self.assertEqual(goodreads._clean_isbn('="9780756404734"'), "9780756404734")
+        self.assertEqual(goodreads._clean_isbn('=""'), "")
+        self.assertEqual(goodreads._clean_isbn("9789644480645"), "9789644480645")
+        self.assertEqual(goodreads._clean_isbn(""), "")
+        self.assertEqual(goodreads._clean_isbn(None), "")
+
+    @patch("integrations.imports.goodreads.services.search")
+    def test_empty_isbn_searches_by_title_only(self, search):
+        """An empty formula is missing, so the title is the only query."""
+        self.user = get_user_model().objects.create_user(
+            username="isbn",
+            password="12345",  # noqa: S106
+        )
+        importer = goodreads.GoodReadsImporter(None, self.user, "new")
+        search.return_value = {"results": []}
+
+        with Path(mock_path / "import_goodreads.csv").open(newline="") as file:
+            reader = DictReader(file)
+            empty = next(row for row in reader if row["Book Id"] == "28825810")
+            wrapped = next(row for row in reader if row["Book Id"] == "1215032")
+
+        importer._search_book(empty, Sources.HARDCOVER)
+        self.assertEqual(search.call_count, 1)
+        self.assertEqual(search.call_args.args[1], empty["Title"])
+
+        search.reset_mock()
+        search.return_value = {"results": []}
+        importer._search_book(wrapped, Sources.HARDCOVER)
+        self.assertEqual(search.call_args_list[0].args[1], "9780756404734")
+        self.assertEqual(search.call_args_list[1].args[1], wrapped["Title"])
+
+    @patch("integrations.imports.goodreads.services.search")
+    def test_wrapped_isbn_is_the_search_query(self, search):
+        """A hit on the unwrapped ISBN does not also search the formula."""
+        self.user = get_user_model().objects.create_user(
+            username="wrap",
+            password="12345",  # noqa: S106
+        )
+        search.return_value = {
+            "results": [
+                {
+                    "media_id": "hc-1",
+                    "title": "Wrapped",
+                    "image": "http://example.com/a.jpg",
+                },
+            ],
+        }
+        row = _row(
+            Title="Wrapped",
+            ISBN13='="9789644480645"',
+            **{"Exclusive Shelf": "to-read", "Book Id": "99"},
+        )
+
+        goodreads.importer(_csv_file([row]), self.user, "new")
+
+        self.assertEqual(search.call_count, 1)
+        self.assertEqual(
+            search.call_args.args,
+            (MediaTypes.BOOK.value, "9789644480645", 1, Sources.HARDCOVER.value),
+        )
+
+
+class ImportGoodreadsMetadata(TestCase):
+    """Goodreads id, community average, page count, and custom shelves."""
+
+    def setUp(self):
+        """Create a user for the import."""
+        self.user = get_user_model().objects.create_user(
+            username="shelves",
+            password="12345",  # noqa: S106
+        )
+
+    def _search(self, _media_type, query, _page, _source):
+        return {
+            "results": [
+                {
+                    "media_id": query[:36],
+                    "title": query,
+                    "image": "http://example.com/a.jpg",
+                },
+            ],
+        }
+
+    @patch("integrations.imports.goodreads.services.search")
+    def test_custom_shelves_ratings_and_progress(self, search):
+        """Tags become lists; exclusive shelves stay statuses."""
+        search.side_effect = self._search
+        rows = [
+            _row(
+                **{
+                    "Book Id": "10",
+                    "Title": "Read Book",
+                    "Exclusive Shelf": "read",
+                    "Bookshelves": " apple-books , read, kindle ",
+                    "My Rating": "5",
+                    "Average Rating": "4.29",
+                    "Number of Pages": "120",
+                    "Date Read": "2024/05/01",
+                },
+            ),
+            _row(
+                **{
+                    "Book Id": "11",
+                    "Title": "Now Book",
+                    "Exclusive Shelf": "currently-reading",
+                    "Bookshelves": "apple-books, currently-reading",
+                    "Average Rating": "3.64",
+                    "Number of Pages": "300",
+                },
+            ),
+            _row(
+                **{
+                    "Book Id": "12",
+                    "Title": "Plan Book",
+                    "Exclusive Shelf": "to-read",
+                    "Bookshelves": "to-read, to-buy",
+                    "Average Rating": "4.00",
+                    "Number of Pages": "80",
+                },
+            ),
+            _row(
+                **{
+                    "Book Id": "13",
+                    "Title": "Drop Book",
+                    "Exclusive Shelf": "did-not-finish",
+                    "Bookshelves": "did-not-finish, fidibo",
+                    "Average Rating": "",
+                    "Number of Pages": "40",
+                },
+            ),
+        ]
+
+        goodreads.importer(_csv_file(rows), self.user, "new")
+
+        read = Book.objects.get(item__title="Read Book")
+        now = Book.objects.get(item__title="Now Book")
+        plan = Book.objects.get(item__title="Plan Book")
+        dropped = Book.objects.get(item__title="Drop Book")
+        self.assertEqual(read.status, Status.COMPLETED.value)
+        self.assertEqual(read.progress, 120)
+        self.assertEqual(read.score, 10)
+        self.assertEqual(now.status, Status.IN_PROGRESS.value)
+        self.assertEqual(now.progress, 0)
+        self.assertEqual(plan.status, Status.PLANNING.value)
+        self.assertEqual(dropped.status, Status.DROPPED.value)
+
+        rating = read.item.public_rating
+        self.assertEqual(rating.goodreads_id, "10")
+        self.assertEqual(rating.goodreads_value, Decimal("4.29"))
+        self.assertEqual(rating.goodreads_normalized, Decimal("85.8"))
+        self.assertEqual(rating.page_count, 120)
+        self.assertIsNone(rating.metacritic_value)
+        self.assertIsNone(rating.metacritic_normalized)
+        self.assertEqual(now.item.public_rating.page_count, 300)
+        self.assertEqual(now.item.public_rating.goodreads_value, Decimal("3.64"))
+        self.assertIsNone(dropped.item.public_rating.goodreads_value)
+        self.assertEqual(dropped.item.public_rating.goodreads_id, "13")
+
+        names = set(
+            CustomList.objects.filter(owner=self.user).values_list("name", flat=True),
+        )
+        self.assertEqual(names, {"apple-books", "kindle", "to-buy", "fidibo"})
+        apple = CustomList.objects.get(owner=self.user, name="apple-books")
+        kindle = CustomList.objects.get(owner=self.user, name="kindle")
+        self.assertEqual(
+            set(apple.items.values_list("title", flat=True)),
+            {"Read Book", "Now Book"},
+        )
+        self.assertEqual(
+            set(kindle.items.values_list("title", flat=True)),
+            {"Read Book"},
+        )
+        self.assertFalse(
+            CustomList.objects.filter(
+                name__in=["read", "currently-reading", "to-read", "did-not-finish"],
+            ).exists(),
+        )
+
+    @patch("integrations.imports.goodreads.services.search")
+    def test_missing_average_column_still_imports(self, search):
+        """A newer export without Average Rating still imports the row."""
+        search.side_effect = self._search
+        row = _row(
+            **{
+                "Book Id": "77",
+                "Title": "No Average",
+                "Exclusive Shelf": "read",
+                "Number of Pages": "50",
+                "My Rating": "4",
+            },
+        )
+        row.pop("Average Rating")
+        fieldnames = [name for name in _row() if name != "Average Rating"]
+
+        imported, warnings = goodreads.importer(
+            _csv_file([row], fieldnames),
+            self.user,
+            "new",
+        )
+
+        book = Book.objects.get(user=self.user)
+        self.assertEqual(imported, {MediaTypes.BOOK.value: 1})
+        self.assertEqual(warnings, "")
+        self.assertEqual(book.status, Status.COMPLETED.value)
+        self.assertEqual(book.progress, 50)
+        self.assertEqual(book.score, 8)
+        rating = ItemRating.objects.get(item=book.item)
+        self.assertEqual(rating.goodreads_id, "77")
+        self.assertIsNone(rating.goodreads_value)
+        self.assertIsNone(rating.goodreads_normalized)
+        self.assertEqual(rating.page_count, 50)

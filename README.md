@@ -42,9 +42,11 @@ You can try the app at [yamtrack.fuzzygrim.com](https://yamtrack.fuzzygrim.com) 
 
 ## Personal dashboard
 
-`/` redirects to `/dashboard`, a chooser with **Movies & TV** (`/dashboard/movies-tv`) and **Games** (`/dashboard/games`). The upstream Home view lives at `/home`.
+`/` redirects to `/dashboard`, a chooser with **Movies & TV** (`/dashboard/movies-tv`), **Games** (`/dashboard/games`), and **Books** (`/dashboard/books`). The upstream Home view lives at `/home`.
 
 Movies & TV is the six rows below. Games lists Continue Playing and Best Owned for the custom lists named `Xbox` and `Nintendo Switch`. A game in both lists appears on both platforms. A missing list leaves those rows empty. Continue Playing is games marked In progress or Paused, most recently updated first. Best Owned is every other game on that list except ones marked Completed or Dropped, highest IGDB critic score first, including games that are not tracked yet.
+
+Books lists Currently reading and one row per custom Goodreads shelf. Currently reading is books marked In progress, with pages read out of the imported page count. Each other row is a custom tag (not the exclusive shelves `read`, `currently-reading`, `to-read`, or `did-not-finish`) of books that are not Completed, highest Goodreads average first. Completed books are imported with their tags, and left off those tag rows.
 
 This fork's movie and TV dashboard has six rows. Each row shows 10 titles. **See all** opens the same titles in the same order, without that cap, as a responsive grid of the same cards. Long lists load further pages as you scroll.
 

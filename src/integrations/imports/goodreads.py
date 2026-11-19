@@ -2,6 +2,7 @@ import logging
 from collections import defaultdict
 from csv import DictReader
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from io import StringIO
 
 from django.apps import apps
@@ -13,6 +14,7 @@ from app.models import MediaTypes, Sources, Status
 from app.providers import services
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
+from lists.models import CustomList
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,14 @@ logger = logging.getLogger(__name__)
 GOODREADS_MIN_RATING = 1
 GOODREADS_MAX_RATING = 5
 GOODREADS_SCORE_SCALE = 2
+# These shelves are a status, not a custom list.
+SHELF_STATUS = {
+    "read": Status.COMPLETED,
+    "currently-reading": Status.IN_PROGRESS,
+    "to-read": Status.PLANNING,
+    "did-not-finish": Status.DROPPED,
+}
+EXCLUSIVE_SHELVES = frozenset(SHELF_STATUS)
 
 
 def importer(file, user, mode):
@@ -55,6 +65,9 @@ class GoodReadsImporter:
 
         # Track bulk creation lists for each media type
         self.bulk_media = defaultdict(list)
+
+        # Custom shelf name -> list, so one import does not create duplicates.
+        self.custom_lists = {}
 
         logger.info(
             "Initialized GoodReads CSV importer for user %s with mode %s",
@@ -151,16 +164,22 @@ class GoodReadsImporter:
 
         logger.debug("Found book %s", book)
 
-        media_id = book["media_id"]
+        media_id = str(book["media_id"])
 
         # Existing books only get what they are missing
-        existing = self._get_existing(str(media_id))
+        existing = self._get_existing(media_id)
+        if existing:
+            item = existing.item
+        else:
+            item, _created = self._create_or_update_item(book)
+
+        self._store_goodreads(item, row)
+        self._assign_custom_shelves(item, row)
+
         if existing:
             if helpers.sync_existing_media(existing, self._get_values(row)):
                 self.to_update[MediaTypes.BOOK.value][existing.pk] = existing
             return
-
-        item, _created = self._create_or_update_item(book)
 
         # Check if we should process this entry based on mode
         if not helpers.should_process_media(
@@ -168,7 +187,7 @@ class GoodReadsImporter:
             self.to_delete,
             MediaTypes.BOOK.value,
             default_source.value,
-            str(media_id),
+            media_id,
             self.mode,
         ):
             return
@@ -186,29 +205,26 @@ class GoodReadsImporter:
         )
 
     def _search_book(self, row, source):
-        """Search for book and return result if found."""
+        """Search Hardcover by cleaned ISBN13, then by title."""
+        isbn = _clean_isbn(row.get("ISBN13"))
+        if isbn:
+            found = self._first_result(isbn, source)
+            if found:
+                return found
+
+        title = (row.get("Title") or "").strip()
+        if not title:
+            return None
+        return self._first_result(title, source)
+
+    def _first_result(self, query, source):
+        """Return the first Hardcover hit for a query."""
         results = services.search(
             MediaTypes.BOOK.value,
-            row["ISBN13"],
+            query,
             1,
             source.value,
-        ).get(
-            "results",
-            [],
-        )
-        if results:
-            return results[0]
-
-        results = services.search(
-            MediaTypes.BOOK.value,
-            row["Title"],
-            1,
-            source.value,
-        ).get(
-            "results",
-            [],
-        )
-
+        ).get("results", [])
         if not results:
             return None
         return results[0]
@@ -228,14 +244,7 @@ class GoodReadsImporter:
 
     def _determine_status(self, row):
         """Map a Goodreads exclusive shelf to a status, or None if unmapped."""
-        status_mapping = {
-            "read": Status.COMPLETED,
-            "currently-reading": Status.IN_PROGRESS,
-            "to-read": Status.PLANNING,
-            "did-not-finish": Status.DROPPED,
-        }
-
-        status = status_mapping.get(row["Exclusive Shelf"])
+        status = SHELF_STATUS.get(row["Exclusive Shelf"])
         return status.value if status else None
 
     def _parse_rating(self, raw):
@@ -268,14 +277,77 @@ class GoodReadsImporter:
             tzinfo=timezone.get_current_timezone(),
         )
 
+    def _parse_average_rating(self, raw):
+        """Return a Goodreads 1-5 community average, or None when unusable."""
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+        try:
+            value = Decimal(text)
+        except InvalidOperation:
+            return None
+        if value < 0 or value > GOODREADS_MAX_RATING:
+            return None
+        return value.quantize(Decimal("0.01"))
+
+    def _parse_pages(self, raw):
+        """Return a page count, or None when the cell is not a whole number."""
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text.isnumeric():
+            return None
+        return int(text)
+
+    def _store_goodreads(self, item, row):
+        """Save the Goodreads id, community average, and page count."""
+        book_id = str(row.get("Book Id") or "").strip()[:32]
+        average = self._parse_average_rating(row.get("Average Rating"))
+        pages = self._parse_pages(row.get("Number of Pages"))
+        if not book_id and average is None and pages is None:
+            return
+
+        rating, _created = app.models.ItemRating.objects.get_or_create(item=item)
+        fields = []
+        if book_id:
+            rating.goodreads_id = book_id
+            fields.append("goodreads_id")
+        if average is not None:
+            rating.goodreads_value = average
+            rating.goodreads_normalized = _normalize_average(average)
+            fields.extend(("goodreads_value", "goodreads_normalized"))
+        if pages is not None:
+            rating.page_count = pages
+            fields.append("page_count")
+        if fields:
+            rating.save(update_fields=fields)
+
+    def _assign_custom_shelves(self, item, row):
+        """Add the book to one list per shelf that is not an exclusive status."""
+        for name in _custom_shelf_names(row.get("Bookshelves")):
+            self._custom_list(name).items.add(item)
+
+    def _custom_list(self, name):
+        """Return the user's list with this exact name, creating it once."""
+        custom_list = self.custom_lists.get(name)
+        if custom_list is not None:
+            return custom_list
+        custom_list = (
+            CustomList.objects.filter(owner=self.user, name=name).order_by("id").first()
+        )
+        if custom_list is None:
+            custom_list = CustomList.objects.create(owner=self.user, name=name)
+        self.custom_lists[name] = custom_list
+        return custom_list
+
     def _get_values(self, row):
         """Get the values of the book tracked in the row."""
         book_status = self._determine_status(row)
+        pages = self._parse_pages(row.get("Number of Pages"))
         book_progress = (
-            int(row["Number of Pages"])
-            if book_status == Status.COMPLETED.value
-            and row["Number of Pages"].isnumeric()
-            else 0
+            pages if book_status == Status.COMPLETED.value and pages is not None else 0
         )
 
         return {
@@ -302,3 +374,33 @@ class GoodReadsImporter:
         instance._history_date = most_recent_date or timezone.now()
 
         return instance
+
+
+def _clean_isbn(value):
+    """Strip Excel ``="..."`` wrapping from a Goodreads ISBN cell."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.startswith("="):
+        text = text[1:].strip()
+    return text.strip("\"'").strip()
+
+
+def _custom_shelf_names(raw):
+    """Return shelf names that should become custom lists, in file order."""
+    names = []
+    seen = set()
+    for part in str(raw or "").split(","):
+        name = part.strip()
+        if not name or name in EXCLUSIVE_SHELVES or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _normalize_average(value):
+    """Scale a Goodreads 1-5 average onto 0-100."""
+    return (value * Decimal(100) / Decimal(GOODREADS_MAX_RATING)).quantize(
+        Decimal("0.1"),
+    )
