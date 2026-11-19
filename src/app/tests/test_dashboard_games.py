@@ -95,7 +95,7 @@ class DashboardChooserTests(TestCase):
             positions.append(content.index(title))
         self.assertEqual(positions, sorted(positions))
         self.assertContains(games, "No games in progress.")
-        self.assertContains(games, "No unfinished owned games.")
+        self.assertContains(games, "No unstarted owned games.")
 
     def test_see_all_urls_still_resolve(self):
         """Movie rows and the four game rows each return a page."""
@@ -112,7 +112,11 @@ class DashboardChooserTests(TestCase):
             page = self.client.get(reverse("dashboard_row", args=[key]))
             self.assertEqual(page.status_code, 200)
             self.assertContains(page, f'href="{reverse("dashboard_games")}"')
-            empty = "No games in progress." if "continue" in key else "No unfinished"
+            empty = (
+                "No games in progress."
+                if "continue" in key
+                else "No unstarted owned games."
+            )
             self.assertContains(page, empty)
 
 
@@ -186,9 +190,11 @@ class DashboardGameRowTests(TestCase):
         self.assertEqual(self._titles("Continue Playing - Xbox"), ["Beta", "Alpha"])
 
     def test_best_owned_orders_by_critic_score_and_shows_the_rounded_badge(self):
-        """Unfinished and untracked games sort by the exact score, nulls last."""
+        """Unstarted and untracked games sort by the exact score, nulls last."""
         xbox = self._list("Xbox")
         specs = (
+            ("playing", "Playing", Decimal(100), Status.IN_PROGRESS.value),
+            ("paused", "Paused", Decimal(98), Status.PAUSED.value),
             ("bravo", "Bravo", Decimal("91.4"), None),
             ("alpha", "Alpha", Decimal("91.2"), None),
             ("also", "Also", Decimal(50), None),
@@ -221,6 +227,53 @@ class DashboardGameRowTests(TestCase):
         self.assertContains(response, ">91<")
         self.assertNotContains(response, "91.4")
         self.assertNotContains(response, "91.2")
+        self.assertNotIn("Playing", titles)
+        self.assertNotIn("Paused", titles)
+        self.assertNotIn("Done", titles)
+        self.assertNotIn("Quit", titles)
+
+    def test_best_owned_keeps_only_games_that_are_not_started(self):
+        """The newest tracking row decides, and a started game stays in Continue."""
+        xbox = self._list("Xbox")
+        shelf = self._item("shelf", "Shelf")
+        soon = self._item("soon", "Soon")
+        playing = self._item("playing", "Playing")
+        paused = self._item("paused", "Paused")
+        done = self._item("done", "Done")
+        quit_game = self._item("quit", "Quit")
+        replay = self._item("replay", "Replay")
+        started = self._item("started", "Started")
+        xbox.items.add(
+            shelf,
+            soon,
+            playing,
+            paused,
+            done,
+            quit_game,
+            replay,
+            started,
+        )
+        self._track(soon, Status.PLANNING.value)
+        self._track(playing, Status.IN_PROGRESS.value)
+        self._track(paused, Status.PAUSED.value)
+        self._track(done, Status.COMPLETED.value)
+        self._track(quit_game, Status.DROPPED.value)
+        self._stamp(self._track(replay, Status.COMPLETED.value), days_ago=2)
+        self._stamp(self._track(replay, Status.PLANNING.value), days_ago=1)
+        self._stamp(self._track(started, Status.PLANNING.value), days_ago=2)
+        self._stamp(self._track(started, Status.IN_PROGRESS.value), days_ago=1)
+
+        titles = self._titles("Best Owned - Xbox")
+        page = self.client.get(reverse("dashboard_row", args=["best-owned-xbox"]))
+
+        self.assertEqual(titles, ["Replay", "Shelf", "Soon"])
+        self.assertEqual(
+            [entry.item.title for entry in page.context["entries"]],
+            titles,
+        )
+        self.assertIn("Playing", self._titles("Continue Playing - Xbox"))
+        self.assertNotIn("Playing", titles)
+        self.assertNotIn("Started", titles)
 
     def test_best_owned_uses_the_first_list_when_the_name_is_duplicated(self):
         """A second list with the same name does not replace the earlier one."""
@@ -272,7 +325,7 @@ class DashboardGameRowTests(TestCase):
         for row in response.context["rows"]:
             self.assertEqual(row["media"], [])
         self.assertContains(response, "No games in progress.")
-        self.assertContains(response, "No unfinished owned games.")
+        self.assertContains(response, "No unstarted owned games.")
 
     def _titles(self, title):
         response = self.client.get(reverse("dashboard_games"))
@@ -295,6 +348,11 @@ class DashboardGameRowTests(TestCase):
 
     def _track(self, item, status):
         return Game.objects.create(item=item, user=self.user, status=status)
+
+    def _stamp(self, game, *, days_ago):
+        Game.objects.filter(pk=game.pk).update(
+            created_at=timezone.now() - timedelta(days=days_ago),
+        )
 
     def _critic(self, item, value):
         ItemRating.objects.create(

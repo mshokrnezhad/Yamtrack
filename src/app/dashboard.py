@@ -53,11 +53,7 @@ _UNREAD = (
     Status.PLANNING.value,
     Status.DROPPED.value,
 )
-_OWNED = (
-    Status.IN_PROGRESS.value,
-    Status.PAUSED.value,
-    Status.PLANNING.value,
-)
+_NOT_STARTED = (Status.PLANNING.value,)
 _ROWS = {
     "top-downloaded-movies": ("downloaded", MediaTypes.MOVIE.value),
     "top-planning-movies": ("planning", MediaTypes.MOVIE.value),
@@ -88,8 +84,8 @@ _EMPTY = {
     "new-episodes": _("No new episodes."),
     "continue-playing-xbox": _("No games in progress."),
     "continue-playing-switch": _("No games in progress."),
-    "best-owned-xbox": _("No unfinished owned games."),
-    "best-owned-switch": _("No unfinished owned games."),
+    "best-owned-xbox": _("No unstarted owned games."),
+    "best-owned-switch": _("No unstarted owned games."),
     CURRENTLY_READING_KEY: _("No books in progress."),
 }
 
@@ -551,7 +547,10 @@ def _continue_playing(user, game_list):
 
 
 def _best_owned(user, game_list):
-    """List games the user has not completed or dropped, highest critic score first."""
+    """List games not started yet, highest critic score first.
+
+    Included when the user has no Game row, or the newest row is Planning.
+    """
     if game_list is None:
         return Item.objects.none()
     latest_status = Subquery(
@@ -568,7 +567,7 @@ def _best_owned(user, game_list):
             latest_status=latest_status,
             card_score=F("public_rating__metacritic_value"),
         )
-        .filter(Q(latest_status__isnull=True) | Q(latest_status__in=_OWNED))
+        .filter(Q(latest_status__isnull=True) | Q(latest_status__in=_NOT_STARTED))
         .order_by(F("card_score").desc(nulls_last=True), Lower("title"))
     )
 
