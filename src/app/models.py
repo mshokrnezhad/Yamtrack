@@ -226,6 +226,7 @@ class ItemRating(models.Model):
     stays NULL. ``ratings_updated_at`` is the last external fetch; editing
     Letterboxd does not change it. Goodreads fields come from the CSV import.
     They are separate from the IGDB critic score in the Metacritic fields.
+    ``goodreads_ratings_count`` is how many ratings that average is based on.
     """
 
     item = models.OneToOneField(
@@ -308,6 +309,7 @@ class ItemRating(models.Model):
         max_digits=5,
         decimal_places=1,
     )
+    goodreads_ratings_count = models.PositiveIntegerField(null=True, blank=True)
     page_count = models.PositiveIntegerField(null=True, blank=True)
     ratings_updated_at = models.DateTimeField(null=True, blank=True)
 
