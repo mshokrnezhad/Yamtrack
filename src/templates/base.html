@@ -27,6 +27,9 @@
     <link rel="stylesheet"
           type="text/css"
           href="{% static 'css/main.css' %}{% get_static_file_mtime 'css/main.css' %}">
+    <link rel="stylesheet"
+          type="text/css"
+          href="{% static 'css/theme.css' %}{% get_static_file_mtime 'css/theme.css' %}">
 
     <script src="{% static 'js/libraries/htmx-2.0.4.min.js' %}"></script>
     <script defer src="{% static 'js/libraries/alpinejs-3.14.9.min.js' %}"></script>
@@ -51,7 +54,7 @@
     <meta name="msapplication-TileColor" content="#181a1b">
     <meta name="msapplication-config"
           content="{% static "favicon/browserconfig.xml" %}">
-    <meta name="theme-color" content="#181a1b">
+    <meta name="theme-color" content="#F4EEE1">
 
   </head>
 
@@ -93,7 +96,7 @@
               </ul>
               {% get_sidebar_dashboard_sections user as sidebar_sections %}
               {% for section in sidebar_sections %}
-                <div class="mb-4">
+                <div class="sidebar-section mb-4">
                   <a href="{{ section.url }}"
                      class="flex items-center space-x-3 px-4 py-2 rounded-md transition-colors duration-200 text-sm font-semibold {% if request.path == section.url %}text-white{% else %}text-gray-300 hover:text-white hover:bg-[#23272b]{% endif %}">
                     {% icon section.media_type is_active=False %}

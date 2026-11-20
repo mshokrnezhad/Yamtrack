@@ -8,6 +8,7 @@ from django.apps import apps
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_not_required
+from django.contrib.auth.views import redirect_to_login
 from django.core.cache import cache
 from django.core.paginator import Paginator
 from django.db import IntegrityError
@@ -20,12 +21,13 @@ from django.http import (
     JsonResponse,
 )
 from django.shortcuts import get_object_or_404, redirect, render
+from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.translation import gettext as _
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from app import config, dashboard, helpers, history_processor, ratings
+from app import config, dashboard, helpers, history_processor, public, ratings
 from app import home as home_helpers
 from app import statistics as stats
 from app.forms import EpisodeForm, ManualItemForm, get_form_class
@@ -142,10 +144,34 @@ def dashboard_refresh_status(request, task_id):
     return HttpResponse(status=204)
 
 
+@login_not_required
+@require_GET
+def root(request):
+    """Send yourself to Home, and everyone else to the public summary or login."""
+    if request.user.is_authenticated:
+        return redirect("dashboard")
+    owner = public.public_user()
+    if owner is None:
+        return redirect_to_login(reverse("dashboard"))
+    html = cache.get(public.cache_key(owner))
+    if html is None:
+        html = render_to_string(
+            "app/public_summary.html",
+            public.summary(owner),
+            request=request,
+        )
+        cache.set(public.cache_key(owner), html, public.CACHE_SECONDS)
+    return HttpResponse(html)
+
+
 @require_GET
 def dashboard_view(request):
     """Home: the chooser for the movie, series, game, and book dashboards."""
-    return render(request, "app/dashboard_home.html")
+    return render(
+        request,
+        "app/dashboard_home.html",
+        {"marquee_items": dashboard.marquee_items(request.user)},
+    )
 
 
 @require_GET

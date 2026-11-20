@@ -691,6 +691,13 @@ if SOCIALACCOUNT_ONLY:
     ACCOUNT_EMAIL_VERIFICATION = "none"
 
 REGISTRATION = config("REGISTRATION", default=True, cast=bool)
+
+# Public summary shown at / to visitors who are not logged in. Off unless
+# PUBLIC_PROFILE_USER names a user. Links to that user's library pages appear
+# only when their profile is not private.
+PUBLIC_PROFILE_USER = config("PUBLIC_PROFILE_USER", default="")
+PUBLIC_PROFILE_NAME = config("PUBLIC_PROFILE_NAME", default="")
+PUBLIC_PROFILE_INTRO = config("PUBLIC_PROFILE_INTRO", default="")
 if not REGISTRATION:
     ACCOUNT_ADAPTER = "users.account_adapter.NoNewUsersAccountAdapter"
 

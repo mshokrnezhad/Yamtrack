@@ -518,7 +518,10 @@ class RootRedirectTests(TestCase):
         response = self.client.get("/")
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.url, reverse("dashboard"))
+        self.assertEqual(
+            response.url,
+            f"{reverse('account_login')}?next={reverse('dashboard')}",
+        )
 
         followed = self.client.get("/", follow=True)
 

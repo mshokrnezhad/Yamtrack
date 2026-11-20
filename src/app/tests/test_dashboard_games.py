@@ -123,6 +123,33 @@ class DashboardChooserTests(TestCase):
         titles = [str(section["title"]) for section in dashboard.sidebar_sections(user)]
         self.assertEqual(titles, ["Movies", "Series", "Books"])
 
+    def test_home_marquee_lists_items_in_progress(self):
+        """Home scrolls the titles in progress, newest first, and skips the rest."""
+        user = get_user_model().objects.get(username="chooser")
+        playing = Item.objects.create(
+            media_id="10",
+            source=Sources.MANUAL.value,
+            media_type=MediaTypes.GAME.value,
+            title="Playing Now",
+            image="http://example.com/a.jpg",
+        )
+        done = Item.objects.create(
+            media_id="11",
+            source=Sources.MANUAL.value,
+            media_type=MediaTypes.GAME.value,
+            title="Finished Game",
+            image="http://example.com/a.jpg",
+        )
+        Game.objects.create(item=playing, user=user, status=Status.IN_PROGRESS.value)
+        Game.objects.create(item=done, user=user, status=Status.COMPLETED.value)
+
+        response = self.client.get(reverse("dashboard"))
+
+        self.assertEqual(response.context["marquee_items"], [playing])
+        self.assertContains(response, "Playing Now", count=2)
+        self.assertContains(response, 'aria-hidden="true"')
+        self.assertNotContains(response, "Finished Game")
+
     def test_movie_series_and_game_pages_do_not_share_rows(self):
         """Each dashboard renders only its own rows."""
         movies = self.client.get(reverse("dashboard_movies"))

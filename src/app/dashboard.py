@@ -157,6 +157,33 @@ _SIDEBAR_GROUPS = (
 )
 
 
+MARQUEE_LIMIT = 12
+
+
+def marquee_items(user):
+    """Return the items in progress across categories, most recent first."""
+    in_progress = []
+    for model in (TV, Movie, Game, Book):
+        queryset = model.objects.filter(
+            user=user,
+            status=Status.IN_PROGRESS.value,
+        ).select_related("item")
+        # TV has no progress of its own; its seasons and episodes carry it.
+        if model is TV:
+            queryset = queryset.order_by("-created_at")
+        else:
+            queryset = queryset.order_by(
+                F("progressed_at").desc(nulls_last=True),
+                "-created_at",
+            )
+        in_progress.extend(queryset[:MARQUEE_LIMIT])
+    in_progress.sort(
+        key=lambda media: getattr(media, "progressed_at", None) or media.created_at,
+        reverse=True,
+    )
+    return [media.item for media in in_progress[:MARQUEE_LIMIT]]
+
+
 def sidebar_sections(user):
     """Return one sidebar group per category, each linking its dashboard rows."""
     sections = []
@@ -489,6 +516,16 @@ def _episode_row(user, key):
 def _continue_row(user):
     """In-progress shows with an aired episode still to watch, newest watch first."""
     return _episode_row(user, "continue-watching")
+
+
+def continue_watching(user):
+    """Return the Continue watching shows, each labeled with its next episode."""
+    return _continue_row(user)["media"]
+
+
+def currently_reading(user):
+    """Return the in-progress books, each with its page count as max_progress."""
+    return _reading_cards(list(_currently_reading(user)[:ROW_LIMIT]))
 
 
 def _new_episodes_row(user):
