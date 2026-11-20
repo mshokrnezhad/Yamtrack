@@ -121,6 +121,79 @@ def _title(key):
     return titles[key]
 
 
+_SIDEBAR_LABELS = {
+    "top-downloaded-movies": _("Top Downloaded"),
+    "top-planning-movies": _("Top Planning"),
+    "top-downloaded-tv": _("Top Downloaded"),
+    "top-planning-tv": _("Top Planning"),
+    "continue-watching": _("Continue watching"),
+    "new-episodes": _("New episodes"),
+    "continue-playing-xbox": _("Continue Playing - Xbox"),
+    "continue-playing-switch": _("Continue Playing - Switch"),
+    "best-owned-xbox": _("Best Owned - Xbox"),
+    "best-owned-switch": _("Best Owned - Switch"),
+    CURRENTLY_READING_KEY: _("Currently reading"),
+}
+_SIDEBAR_GROUPS = (
+    (
+        _("Movies"),
+        MediaTypes.MOVIE.value,
+        "dashboard_movies_tv",
+        ("top-downloaded-movies", "top-planning-movies"),
+    ),
+    (
+        _("Series"),
+        MediaTypes.TV.value,
+        "dashboard_movies_tv",
+        (
+            "continue-watching",
+            "new-episodes",
+            "top-downloaded-tv",
+            "top-planning-tv",
+        ),
+    ),
+    (_("Games"), MediaTypes.GAME.value, "dashboard_games", tuple(_GAME_ROWS)),
+    (_("Books"), MediaTypes.BOOK.value, "dashboard_books", (CURRENTLY_READING_KEY,)),
+)
+
+
+def sidebar_sections(user):
+    """Return one sidebar group per category, each linking its dashboard rows."""
+    sections = []
+    for title, media_type, dashboard_name, keys in _SIDEBAR_GROUPS:
+        rows = [
+            {
+                "title": _SIDEBAR_LABELS[key],
+                "url": reverse("dashboard_row", args=[key]),
+            }
+            for key in keys
+        ]
+        if media_type == MediaTypes.BOOK.value:
+            rows.extend(
+                {
+                    "title": custom_list.name,
+                    "url": reverse(
+                        "dashboard_row",
+                        args=[f"{BOOK_TAG_PREFIX}{custom_list.id}"],
+                    ),
+                }
+                for custom_list in _book_tag_lists(user)
+            )
+        sections.append(
+            {
+                "title": title,
+                "media_type": media_type,
+                "url": reverse(dashboard_name),
+                "library_url": reverse(
+                    "medialist",
+                    kwargs={"username": user.username, "media_type": media_type},
+                ),
+                "rows": rows,
+            },
+        )
+    return sections
+
+
 def _key(kind, media_type):
     """Return the route key for a row kind and media type."""
     for key, row in _ROWS.items():

@@ -9,6 +9,7 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
+from app import dashboard
 from app.models import Game, Item, ItemRating, MediaTypes, Sources, Status
 from app.providers import igdb
 from app.providers.services import ProviderAPIError
@@ -24,6 +25,12 @@ GAME_TITLES = (
     "Continue Playing - Switch",
     "Best Owned - Xbox",
     "Best Owned - Switch",
+)
+GAME_ROW_KEYS = (
+    "continue-playing-xbox",
+    "continue-playing-switch",
+    "best-owned-xbox",
+    "best-owned-switch",
 )
 MOVIE_ROW_KEYS = (
     "top-downloaded-movies",
@@ -70,30 +77,55 @@ class DashboardChooserTests(TestCase):
         self.assertEqual(root.status_code, 302)
         self.assertEqual(root.url, "/dashboard")
 
+    def test_sidebar_lists_rows_per_category(self):
+        """The sidebar groups every dashboard row under its category."""
+        user = get_user_model().objects.get(username="chooser")
+        shelf = CustomList.objects.create(name="kindle", owner=user)
+        book = Item.objects.create(
+            media_id="1",
+            source=Sources.MANUAL.value,
+            media_type=MediaTypes.BOOK.value,
+            title="Book",
+            image="http://example.com/a.jpg",
+        )
+        shelf.items.add(book)
+
+        response = self.client.get(reverse("dashboard_games"))
+        sections = {
+            str(section["title"]): [str(row["title"]) for row in section["rows"]]
+            for section in dashboard.sidebar_sections(user)
+        }
+
+        self.assertEqual(list(sections), ["Movies", "Series", "Games", "Books"])
+        self.assertEqual(sections["Games"], list(GAME_TITLES))
+        self.assertEqual(sections["Books"], ["Currently reading", "kindle"])
+        for key in (*MOVIE_ROW_KEYS, *GAME_ROW_KEYS, "currently-reading"):
+            self.assertContains(
+                response,
+                f'href="{reverse("dashboard_row", args=[key])}"',
+            )
+        self.assertContains(
+            response,
+            f'href="{reverse("dashboard_row", args=[f"book-tag-{shelf.id}"])}"',
+        )
+        self.assertNotContains(response, "/chooser/anime")
+
     def test_movie_and_game_pages_do_not_share_rows(self):
         """Each dashboard renders only its own rows."""
         movies = self.client.get(reverse("dashboard_movies_tv"))
         games = self.client.get(reverse("dashboard_games"))
-        content = games.content.decode()
+        # The sidebar names every row on every page, so compare the rows.
+        movie_titles = [str(row["title"]) for row in movies.context["rows"]]
+        game_titles = [str(row["title"]) for row in games.context["rows"]]
 
-        self.assertContains(movies, "Continue watching")
-        self.assertContains(movies, "New episodes")
+        self.assertIn("Continue watching", movie_titles)
+        self.assertIn("New episodes", movie_titles)
         self.assertContains(movies, "Refresh")
         self.assertContains(movies, "Movies &amp; TV")
-        self.assertNotContains(movies, "Continue Playing - Xbox")
-        self.assertNotContains(movies, "Best Owned - Switch")
-        self.assertNotContains(games, "Continue watching")
-        self.assertNotContains(games, "New episodes")
-        self.assertNotContains(games, "Top Downloaded movies")
-        self.assertNotContains(games, "Top Planning movies")
-        self.assertNotContains(games, "Top Downloaded TV")
-        self.assertNotContains(games, "Top Planning TV")
+        self.assertNotIn("Continue Playing - Xbox", movie_titles)
+        self.assertNotIn("Best Owned - Switch", movie_titles)
+        self.assertEqual(game_titles, list(GAME_TITLES))
         self.assertNotContains(games, "Refresh")
-        positions = []
-        for title in GAME_TITLES:
-            self.assertContains(games, title)
-            positions.append(content.index(title))
-        self.assertEqual(positions, sorted(positions))
         self.assertContains(games, "No games in progress.")
         self.assertContains(games, "No unstarted owned games.")
 

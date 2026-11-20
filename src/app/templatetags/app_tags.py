@@ -9,7 +9,7 @@ from django.utils.html import format_html
 from django.utils.translation import pgettext
 from unidecode import unidecode
 
-from app import config, helpers
+from app import config, dashboard, helpers
 from app.models import MediaTypes, Sources, Status
 from app.ratings import format_public_value
 from users.models import WATCH_PROVIDER_REGION_UNSET
@@ -378,6 +378,12 @@ def get_sidebar_media_types(user):
         }
         for media_type in enabled_types
     ]
+
+
+@register.simple_tag
+def get_sidebar_dashboard_sections(user):
+    """Return the per-category dashboard rows shown in the sidebar."""
+    return dashboard.sidebar_sections(user)
 
 
 @register.filter

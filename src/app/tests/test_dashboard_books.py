@@ -132,13 +132,11 @@ class DashboardBookTests(TestCase):
         self.assertNotContains(response, "Halo")
         self.assertNotContains(response, "Mario")
         self.assertNotContains(response, "Refresh")
-        self.assertNotContains(response, "Continue watching")
-        self.assertNotContains(response, "Continue Playing - Xbox")
-        self.assertNotContains(response, "Top Downloaded movies")
-        self.assertNotContains(movies, "Currently reading")
-        self.assertNotContains(movies, "paperback")
-        self.assertNotContains(games, "Currently reading")
-        self.assertNotContains(games, "paperback")
+        # The sidebar names every row on every page, so compare the rows.
+        for page in (movies, games):
+            page_titles = [str(row["title"]) for row in page.context["rows"]]
+            self.assertNotIn("Currently reading", page_titles)
+            self.assertNotIn("paperback", page_titles)
         for name in (*EXCLUSIVE, "Xbox", "Nintendo Switch"):
             self.assertNotIn(name, titles)
 

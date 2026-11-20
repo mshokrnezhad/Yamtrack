@@ -102,25 +102,36 @@
                   </a>
                 </li>
 
-                {% get_sidebar_media_types user as sidebar_media_types %}
-                {% for item in sidebar_media_types %}
-                  <li>
-                    {% if target_user is None or target_user == request.user %}
-                      <a href="{% url 'medialist' username=user.username media_type=item.media_type %}"
-                         class="flex items-center space-x-3 px-4 py-2 rounded-md transition-colors duration-200 text-sm {% if media_type == item.media_type %}text-white bg-[#2c3136]{% else %}text-gray-400 hover:text-white hover:bg-[#23272b]{% endif %}">
-                        {% icon item.media_type is_active=media_type|str_equals:item.media_type %}
-                        <span>{{ item.display_name }}</span>
-                      </a>
-                    {% else %}
-                      <a href="{% url 'medialist' username=user.username media_type=item.media_type %}"
-                         class="flex items-center space-x-3 px-4 py-2 rounded-md transition-colors duration-200 text-sm text-gray-400 hover:text-white hover:bg-[#23272b]">
-                        {% icon item.media_type is_active=False %}
-                        <span>{{ item.display_name }}</span>
-                      </a>
-                    {% endif %}
-                  </li>
-                {% endfor %}
               </ul>
+              {% get_sidebar_dashboard_sections user as sidebar_sections %}
+              {% for section in sidebar_sections %}
+                <div class="mb-4">
+                  <a href="{{ section.url }}"
+                     class="flex items-center space-x-3 px-4 py-2 rounded-md transition-colors duration-200 text-sm font-semibold {% if request.path == section.url %}text-white{% else %}text-gray-300 hover:text-white hover:bg-[#23272b]{% endif %}">
+                    {% icon section.media_type is_active=False %}
+                    <span>{{ section.title }}</span>
+                  </a>
+                  <ul class="space-y-1">
+                    {% with is_library=media_type|str_equals:section.media_type %}
+                      <li>
+                        <a href="{{ section.library_url }}"
+                           class="block truncate pl-10 pr-3 py-1 rounded-md transition-colors duration-200 text-sm {% if is_library and target_user == request.user %}text-white bg-[#2c3136]{% else %}text-gray-400 hover:text-white hover:bg-[#23272b]{% endif %}">
+                          {% trans "Library" %}
+                        </a>
+                      </li>
+                    {% endwith %}
+                    {% for row in section.rows %}
+                      <li>
+                        <a href="{{ row.url }}"
+                           title="{{ row.title }}"
+                           class="block truncate pl-10 pr-3 py-1 rounded-md transition-colors duration-200 text-sm {% if request.path == row.url %}text-white bg-[#2c3136]{% else %}text-gray-400 hover:text-white hover:bg-[#23272b]{% endif %}">
+                          {{ row.title }}
+                        </a>
+                      </li>
+                    {% endfor %}
+                  </ul>
+                </div>
+              {% endfor %}
             {% endblock sidebar_own_media %}
 
             {% block sidebar_external_media_view %}
