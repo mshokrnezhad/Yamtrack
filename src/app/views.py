@@ -52,6 +52,7 @@ from users.models import (
 )
 
 logger = logging.getLogger(__name__)
+PARENT_SEARCH_LIMIT = 20
 
 
 @require_GET
@@ -143,20 +144,34 @@ def dashboard_refresh_status(request, task_id):
 
 @require_GET
 def dashboard_view(request):
-    """Chooser for the movie, game, and book dashboards."""
+    """Home: the chooser for the movie, series, game, and book dashboards."""
     return render(request, "app/dashboard_home.html")
 
 
 @require_GET
-def dashboard_movies_tv(request):
-    """Movie and TV rows for the logged-in user."""
+def dashboard_movies(request):
+    """Movie rows for the logged-in user."""
     return render(
         request,
         "app/dashboard.html",
         {
-            "page_title": _("Movies & TV"),
+            "page_title": _("Movies"),
+            "show_refresh": False,
+            "rows": dashboard.build_movie_rows(request.user),
+        },
+    )
+
+
+@require_GET
+def dashboard_series(request):
+    """Series rows for the logged-in user."""
+    return render(
+        request,
+        "app/dashboard.html",
+        {
+            "page_title": _("Series"),
             "show_refresh": True,
-            "rows": dashboard.build_rows(request.user),
+            "rows": dashboard.build_series_rows(request.user),
         },
     )
 
@@ -910,7 +925,7 @@ def episode_save(request):
 def create_entry(request):
     """Return the form for manually adding media items."""
     if request.method == "GET":
-        media_types = MediaTypes.values
+        media_types = request.user.get_selectable_media_types()
         return render(request, "app/create_entry.html", {"media_types": media_types})
 
     # Process the form submission
@@ -984,7 +999,7 @@ def search_parent_tv(request):
     """Return the search results for parent TV shows."""
     query = request.GET.get("q", "").strip()
 
-    if len(query) <= 1:
+    if len(query) == 1:
         return render(request, "app/components/search_parent_tv.html")
 
     logger.debug(
@@ -993,12 +1008,13 @@ def search_parent_tv(request):
         query,
     )
 
+    # An empty query lists every custom show, so the field can be browsed.
     parent_tvs = TV.objects.filter(
         user=request.user,
         item__source=Sources.MANUAL.value,
         item__media_type=MediaTypes.TV.value,
         item__title__icontains=query,
-    )[:5]
+    ).order_by("item__title")[:PARENT_SEARCH_LIMIT]
 
     return render(
         request,
@@ -1012,7 +1028,7 @@ def search_parent_season(request):
     """Return the search results for parent seasons."""
     query = request.GET.get("q", "").strip()
 
-    if len(query) <= 1:
+    if len(query) == 1 and not query.isdecimal():
         return render(request, "app/components/search_parent_tv.html")
 
     logger.debug(
@@ -1021,12 +1037,19 @@ def search_parent_season(request):
         query,
     )
 
-    parent_seasons = Season.objects.filter(
+    # An empty query lists every custom season. A number picks that season
+    # number first, since a title like "(1964)" would match almost any digit.
+    seasons = Season.objects.filter(
         user=request.user,
         item__source=Sources.MANUAL.value,
         item__media_type=MediaTypes.SEASON.value,
-        item__title__icontains=query,
-    )[:5]
+    ).order_by("item__title", "item__season_number")
+    parent_seasons = None
+    if query.isdecimal():
+        parent_seasons = seasons.filter(item__season_number=int(query))
+    if not parent_seasons:
+        parent_seasons = seasons.filter(item__title__icontains=query)
+    parent_seasons = parent_seasons[:PARENT_SEARCH_LIMIT]
 
     return render(
         request,

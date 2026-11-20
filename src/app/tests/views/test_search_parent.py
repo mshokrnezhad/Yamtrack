@@ -134,3 +134,46 @@ class SearchParentViewTests(TestCase):
         self.assertIn("results", response.context)
 
         self.assertEqual(len(response.context["results"]), 0)
+
+    def test_empty_query_lists_every_custom_show_and_season(self):
+        """Focusing an empty field lists the user's shows and seasons by title."""
+        shows = self.client.get(reverse("search_parent_tv") + "?q=")
+        seasons = self.client.get(reverse("search_parent_season") + "?q=")
+
+        self.assertEqual(list(shows.context["results"]), [self.tv2, self.tv1])
+        self.assertEqual(
+            list(seasons.context["results"]),
+            [self.season2, self.season1],
+        )
+        self.assertNotContains(shows, "No TV shows found")
+        self.assertNotContains(seasons, "No seasons found")
+
+    def test_season_number_query_matches_the_season(self):
+        """Typing a season number finds that season of any custom show."""
+        response = self.client.get(reverse("search_parent_season") + "?q=1")
+
+        self.assertEqual(
+            list(response.context["results"]),
+            [self.season2, self.season1],
+        )
+        none = self.client.get(reverse("search_parent_season") + "?q=7")
+        self.assertEqual(list(none.context["results"]), [])
+
+        self.season1.item.season_number = 2
+        self.season1.item.title = "Show (1964)"
+        self.season1.item.save()
+        second = self.client.get(reverse("search_parent_season") + "?q=2")
+        self.assertEqual(list(second.context["results"]), [self.season1])
+        by_title = self.client.get(reverse("search_parent_season") + "?q=1964")
+        self.assertEqual(list(by_title.context["results"]), [self.season1])
+
+    def test_show_title_with_quote_is_escaped_for_the_picker(self):
+        """A quote in a show title cannot break the click handler."""
+        self.tv1.item.title = "Bob's Show"
+        self.tv1.item.save()
+
+        response = self.client.get(reverse("search_parent_tv") + "?q=Bob")
+
+        backslash = chr(92)
+        self.assertContains(response, f"Bob{backslash}u0027s Show")
+        self.assertNotContains(response, "'Bob's Show'")

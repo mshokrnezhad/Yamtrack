@@ -448,3 +448,32 @@ class UserWeekStartDayTests(TestCase):
         self.assertEqual(result, WeekStartDayChoices.SUNDAY)
         user.refresh_from_db()
         self.assertEqual(user.week_start_day, WeekStartDayChoices.SUNDAY)
+
+
+class UserSelectableMediaTypesTests(TestCase):
+    """Tests for the User.get_selectable_media_types method."""
+
+    def setUp(self):
+        """Set up test data."""
+        self.user = get_user_model().objects.create_user(
+            username="picker",
+            password="12345",  # noqa: S106
+        )
+
+    def test_all_types_by_default(self):
+        """Every type, episodes included, is offered while all are enabled."""
+        self.assertEqual(self.user.get_selectable_media_types(), MediaTypes.values)
+
+    def test_disabled_types_are_left_out(self):
+        """Disabled types drop out, and seasons and episodes follow TV."""
+        for media_type in ("anime", "manga", "comic", "boardgame", "tv", "season"):
+            setattr(self.user, f"{media_type}_enabled", False)
+
+        self.assertEqual(
+            self.user.get_selectable_media_types(),
+            [
+                MediaTypes.MOVIE.value,
+                MediaTypes.GAME.value,
+                MediaTypes.BOOK.value,
+            ],
+        )

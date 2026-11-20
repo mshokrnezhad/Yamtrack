@@ -138,18 +138,18 @@ _SIDEBAR_GROUPS = (
     (
         _("Movies"),
         MediaTypes.MOVIE.value,
-        "dashboard_movies_tv",
+        "dashboard_movies",
         ("top-downloaded-movies", "top-planning-movies"),
     ),
     (
         _("Series"),
         MediaTypes.TV.value,
-        "dashboard_movies_tv",
+        "dashboard_series",
         (
-            "continue-watching",
-            "new-episodes",
             "top-downloaded-tv",
             "top-planning-tv",
+            "continue-watching",
+            "new-episodes",
         ),
     ),
     (_("Games"), MediaTypes.GAME.value, "dashboard_games", tuple(_GAME_ROWS)),
@@ -160,7 +160,10 @@ _SIDEBAR_GROUPS = (
 def sidebar_sections(user):
     """Return one sidebar group per category, each linking its dashboard rows."""
     sections = []
+    enabled = set(user.get_enabled_media_types())
     for title, media_type, dashboard_name, keys in _SIDEBAR_GROUPS:
+        if media_type not in enabled:
+            continue
         rows = [
             {
                 "title": _SIDEBAR_LABELS[key],
@@ -203,8 +206,8 @@ def _key(kind, media_type):
     raise KeyError(message)
 
 
-def build_rows(user):
-    """Return the dashboard rows, always including the episode rows."""
+def build_movie_rows(user):
+    """Return the movie rows that have something to show."""
     downloaded = _downloaded_list(user)
     rows = [
         _list_row(
@@ -214,6 +217,14 @@ def build_rows(user):
             _title("top-downloaded-movies"),
         ),
         _planning_row(user, MediaTypes.MOVIE.value, _title("top-planning-movies")),
+    ]
+    return [row for row in rows if row["media"]]
+
+
+def build_series_rows(user):
+    """Return the series rows, always including the episode rows."""
+    downloaded = _downloaded_list(user)
+    rows = [
         _list_row(user, downloaded, MediaTypes.TV.value, _title("top-downloaded-tv")),
         _planning_row(user, MediaTypes.TV.value, _title("top-planning-tv")),
     ]
@@ -700,7 +711,9 @@ def _row_dashboard(key):
         return "dashboard_books"
     if key in _GAME_ROWS:
         return "dashboard_games"
-    return "dashboard_movies_tv"
+    if _ROWS[key][1] == MediaTypes.MOVIE.value:
+        return "dashboard_movies"
+    return "dashboard_series"
 
 
 def _row_title(user, key):

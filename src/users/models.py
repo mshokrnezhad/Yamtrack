@@ -696,6 +696,17 @@ class User(AbstractUser):
 
         return enabled_types
 
+    def get_selectable_media_types(self):
+        """Return enabled types in catalog order, with seasons and episodes for TV.
+
+        Pickers such as Create Custom and the list type filter use this, so a
+        media type switched off in the sidebar settings is offered nowhere.
+        """
+        active = set(self.get_active_media_types())
+        if MediaTypes.TV.value in active:
+            active.add(MediaTypes.EPISODE.value)
+        return [value for value in MediaTypes.values if value in active]
+
     def get_import_tasks(self):
         """Return import tasks history and schedules for the user."""
         import_tasks = {

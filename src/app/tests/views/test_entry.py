@@ -35,6 +35,20 @@ class CreateEntryViewTests(TestCase):
 
         self.assertEqual(response.context["media_types"], MediaTypes.values)
 
+    def test_create_entry_offers_only_enabled_media_types(self):
+        """A media type switched off in the sidebar settings is not offered."""
+        self.user.anime_enabled = False
+        self.user.boardgame_enabled = False
+        self.user.save()
+
+        response = self.client.get(reverse("create_entry"))
+        media_types = response.context["media_types"]
+
+        self.assertNotIn(MediaTypes.ANIME.value, media_types)
+        self.assertNotIn(MediaTypes.BOARDGAME.value, media_types)
+        self.assertIn(MediaTypes.SEASON.value, media_types)
+        self.assertIn(MediaTypes.EPISODE.value, media_types)
+
     def test_create_entry_status_options_are_translated(self):
         """Status options show the translated label and submit the stored value."""
         self.user.language = "it-it"

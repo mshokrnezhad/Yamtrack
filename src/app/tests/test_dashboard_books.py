@@ -114,8 +114,9 @@ class DashboardBookTests(TestCase):
 
         response = self.client.get(reverse("dashboard_books"))
         titles = [str(row["title"]) for row in response.context["rows"]]
-        movies = self.client.get(reverse("dashboard_movies_tv"))
+        movies = self.client.get(reverse("dashboard_movies"))
         games = self.client.get(reverse("dashboard_games"))
+        series = self.client.get(reverse("dashboard_series"))
 
         self.assertEqual(titles, ["Currently reading", "kindle", "paperback"])
         self.assertEqual(self._titles(response, "Currently reading"), ["Bravo"])
@@ -133,7 +134,7 @@ class DashboardBookTests(TestCase):
         self.assertNotContains(response, "Mario")
         self.assertNotContains(response, "Refresh")
         # The sidebar names every row on every page, so compare the rows.
-        for page in (movies, games):
+        for page in (movies, series, games):
             page_titles = [str(row["title"]) for row in page.context["rows"]]
             self.assertNotIn("Currently reading", page_titles)
             self.assertNotIn("paperback", page_titles)

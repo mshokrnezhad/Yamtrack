@@ -541,24 +541,17 @@ class RootRedirectTests(TestCase):
         self.assertEqual(logged_in.status_code, 200)
         self.assertEqual(logged_in.request["PATH_INFO"], reverse("dashboard"))
 
-    def test_home_sidebar_is_active_only_on_home(self):
-        """The Home item is active on /home and inactive on /dashboard."""
-        home = self.client.get(reverse("home"))
+    def test_sidebar_home_opens_the_dashboard(self):
+        """Home is the only top item, links to /dashboard, and is active there."""
         dashboard = self.client.get(reverse("dashboard"))
-        home_html = home.content.decode()
         dashboard_html = dashboard.content.decode()
 
-        home_class, home_inner = _anchor(home_html, reverse("home"))
+        home_class, home_inner = _anchor(dashboard_html, reverse("dashboard"))
         self.assertIn("bg-[#2c3136]", home_class)
         self.assertIn("text-indigo-400", home_inner)
-
-        inactive_class, inactive_inner = _anchor(dashboard_html, reverse("home"))
-        self.assertNotIn("bg-[#2c3136]", inactive_class)
-        self.assertNotIn("text-indigo-400", inactive_inner)
-
-        dashboard_class, dashboard_inner = _anchor(dashboard_html, reverse("dashboard"))
-        self.assertIn("bg-[#2c3136]", dashboard_class)
-        self.assertIn("text-indigo-400", dashboard_inner)
+        self.assertIn("Home", home_inner)
+        self.assertNotIn("<span>Dashboard</span>", dashboard_html)
+        self.assertNotIn(f'href="{reverse("home")}"', dashboard_html)
 
     def test_manifest_starts_at_dashboard_and_keeps_its_id(self):
         """The installed app identity stays /, and launch goes to the dashboard."""

@@ -28,7 +28,12 @@ urlpatterns = [
         views.dashboard_refresh_status,
         name="dashboard_refresh_status",
     ),
-    path("dashboard/movies-tv", views.dashboard_movies_tv, name="dashboard_movies_tv"),
+    path(
+        "dashboard/movies-tv",
+        RedirectView.as_view(pattern_name="dashboard", permanent=False),
+    ),
+    path("dashboard/movies", views.dashboard_movies, name="dashboard_movies"),
+    path("dashboard/series", views.dashboard_series, name="dashboard_series"),
     path("dashboard/games", views.dashboard_games, name="dashboard_games"),
     path("dashboard/books", views.dashboard_books, name="dashboard_books"),
     path("dashboard/<slug:row_key>", views.dashboard_row, name="dashboard_row"),

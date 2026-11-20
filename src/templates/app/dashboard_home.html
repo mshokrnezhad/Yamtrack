@@ -1,28 +1,29 @@
 {% extends "base.html" %}
-{% load i18n %}
+{% load i18n app_tags %}
 
 {% block title %}
-  {% trans "Dashboard" %} - Yamtrack
+  {% trans "Home" %} - Yamtrack
 {% endblock title %}
 
 {% block content %}
   <div class="space-y-8">
-    <h1 class="text-3xl font-bold">{% trans "Dashboard" %}</h1>
+    <h1 class="text-3xl font-bold">{% trans "Home" %}</h1>
     <div class="dashboard-choices">
-      <a class="dashboard-choice" href="{% url 'dashboard_movies_tv' %}">
-        {% include "app/icons/film.svg" with classes="dashboard-choice-icon" %}
-        {% trans "Movies & TV" as label %}
-        <span class="dashboard-choice-label">{{ label|force_escape }}</span>
+      <a class="dashboard-choice" href="{% url 'dashboard_movies' %}">
+        {% icon "movie" is_active=False extra_classes="dashboard-choice-icon" %}
+        <span class="dashboard-choice-label">{% trans "Movies" %}</span>
+      </a>
+      <a class="dashboard-choice" href="{% url 'dashboard_series' %}">
+        {% icon "tv" is_active=False extra_classes="dashboard-choice-icon" %}
+        <span class="dashboard-choice-label">{% trans "Series" %}</span>
       </a>
       <a class="dashboard-choice" href="{% url 'dashboard_games' %}">
-        {% include "app/icons/gamepad-directional.svg" with classes="dashboard-choice-icon" %}
-        {% trans "Games" as label %}
-        <span class="dashboard-choice-label">{{ label|force_escape }}</span>
+        {% icon "game" is_active=False extra_classes="dashboard-choice-icon" %}
+        <span class="dashboard-choice-label">{% trans "Games" %}</span>
       </a>
       <a class="dashboard-choice" href="{% url 'dashboard_books' %}">
-        {% include "app/icons/book-open.svg" with classes="dashboard-choice-icon" %}
-        {% trans "Books" as label %}
-        <span class="dashboard-choice-label">{{ label|force_escape }}</span>
+        {% icon "book" is_active=False extra_classes="dashboard-choice-icon" %}
+        <span class="dashboard-choice-label">{% trans "Books" %}</span>
       </a>
     </div>
   </div>

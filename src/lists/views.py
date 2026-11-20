@@ -9,7 +9,7 @@ from django.utils.translation import gettext as _
 from django.views.decorators.http import require_GET, require_POST
 
 from app import helpers
-from app.models import Item, MediaManager, MediaTypes
+from app.models import Item, MediaManager
 from app.providers import services
 from lists.forms import CustomListForm
 from lists.models import CustomList, CustomListItem
@@ -193,7 +193,7 @@ def list_detail(request, list_id):
         context.update(
             {
                 "form": CustomListForm(instance=custom_list),
-                "media_types": MediaTypes.values,
+                "media_types": custom_list.owner.get_selectable_media_types(),
                 "items_count": paginator.count,
                 "collaborators_count": custom_list.collaborators.count() + 1,
             },

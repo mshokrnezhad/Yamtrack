@@ -15,7 +15,8 @@ from app.dashboard import (
     _list_row,
     _new_episodes_row,
     _planning_row,
-    build_rows,
+    build_movie_rows,
+    build_series_rows,
     complete_finished_shows,
     refresh_for_user,
 )
@@ -555,7 +556,7 @@ class DashboardRowTests(TestCase):
 
         self.client.login(username="dash", password="test-pass")  # noqa: S106
         page = self.client.get(reverse("dashboard_row", args=["new-episodes"]))
-        dashboard = self.client.get(reverse("dashboard_movies_tv"))
+        dashboard = self.client.get(reverse("dashboard_series"))
 
         self.assertContains(page, "S3E1")
         self.assertContains(page, "2 left")
@@ -578,7 +579,7 @@ class DashboardRowTests(TestCase):
         row = _new_episodes_row(self.user)
         page = self.client.get(reverse("dashboard_row", args=["new-episodes"]))
         shown = page.context["entries"]
-        dashboard = self.client.get(reverse("dashboard_movies_tv"))
+        dashboard = self.client.get(reverse("dashboard_series"))
         expected = [f"Aired {number:02d}" for number in range(total)]
 
         self.assertEqual(page.status_code, 200)
@@ -614,14 +615,12 @@ class DashboardRowTests(TestCase):
         item = self._movie_item("400", "Only")
         Movie.objects.create(item=item, user=self.user, status=Status.PLANNING.value)
 
-        rows = build_rows(self.user)
+        movie_titles = [row["title"] for row in build_movie_rows(self.user)]
+        rows = build_series_rows(self.user)
         titles = [row["title"] for row in rows]
 
-        self.assertEqual(
-            titles,
-            ["Top Planning movies", "Continue watching", "New episodes"],
-        )
-        self.assertEqual(titles[titles.index("Continue watching") + 1], "New episodes")
+        self.assertEqual(movie_titles, ["Top Planning movies"])
+        self.assertEqual(titles, ["Continue watching", "New episodes"])
         self.assertEqual(rows[-2]["media"], [])
         self.assertEqual(rows[-1]["media"], [])
 
@@ -670,10 +669,18 @@ class DashboardRowTests(TestCase):
                     "new-episodes": show.item,
                 }
 
-        dashboard = self.client.get(reverse("dashboard_movies_tv"))
-        rows = {row["see_all"]: row["media"] for row in dashboard.context["rows"]}
+        pages = {
+            MediaTypes.MOVIE.value: self.client.get(reverse("dashboard_movies")),
+            MediaTypes.TV.value: self.client.get(reverse("dashboard_series")),
+        }
+        rows = {
+            row["see_all"]: row["media"]
+            for page in pages.values()
+            for row in page.context["rows"]
+        }
         for key, eleventh in extra.items():
             with self.subTest(key=key):
+                dashboard = pages[eleventh.media_type]
                 url = reverse("dashboard_row", args=[key])
                 page = self.client.get(url)
                 shown = page.context["entries"]
@@ -850,17 +857,22 @@ class DashboardViewTests(TestCase):
 
     def test_page_shows_filled_rows_and_their_see_all_links(self):
         """Filled rows render, empty rows do not, and See all opens that row."""
-        response = self.client.get(reverse("dashboard_movies_tv"))
+        movies = self.client.get(reverse("dashboard_movies"))
+        response = self.client.get(reverse("dashboard_series"))
 
+        self.assertEqual(movies.status_code, 200)
+        self.assertContains(movies, "Top Planning movies")
+        self.assertContains(movies, "Visible")
+        self.assertContains(movies, "See all")
+        self.assertContains(movies, 'href="/dashboard/top-planning-movies"')
+        self.assertNotContains(movies, "status=Planning")
+        self.assertNotContains(movies, "sort=public_rating")
+        self.assertNotContains(movies, "Top Downloaded movies")
+        self.assertNotContains(movies, "No shows in progress.")
+        self.assertNotContains(movies, "Refresh")
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Top Planning movies")
-        self.assertContains(response, "Visible")
-        self.assertContains(response, "See all")
-        self.assertContains(response, 'href="/dashboard/top-planning-movies"')
+        self.assertNotContains(response, "Visible")
         self.assertContains(response, 'href="/dashboard/continue-watching"')
-        self.assertNotContains(response, "status=Planning")
-        self.assertNotContains(response, "sort=public_rating")
-        self.assertNotContains(response, "Top Downloaded movies")
         self.assertContains(response, "Continue watching")
         self.assertContains(response, "No shows in progress.")
         self.assertContains(response, "New episodes")
@@ -931,7 +943,7 @@ class DashboardViewTests(TestCase):
                 [Episode(item=episode_item, related_season=season, end_date=watched)],
             )
 
-        response = self.client.get(reverse("dashboard_movies_tv"))
+        response = self.client.get(reverse("dashboard_series"))
 
         self.assertContains(response, "No shows in progress.")
         self.assertNotContains(response, "Archive")
@@ -994,7 +1006,7 @@ class DashboardViewTests(TestCase):
                 datetime=watched,
             )
 
-        response = self.client.get(reverse("dashboard_movies_tv"))
+        response = self.client.get(reverse("dashboard_series"))
 
         self.assertContains(response, "S1E2")
         self.assertContains(response, "1 left")

@@ -21,7 +21,7 @@
     </div>
     {# djlint:off #}
     <form method="post" class="space-y-6" x-data="{
-      mediaType: 'tv',
+      mediaType: '{{ media_types.0|default:"tv"|escapejs }}',
       placeholderHtml: null,
 
       init() {
@@ -146,12 +146,12 @@
             <div class="relative">
               <input id="parent-tv-input"
                      class="w-full p-2 pl-9 bg-[#39404b] rounded-md text-white border border-gray-600 focus:outline-none focus:ring-2 focus:ring-[#4a9eff] appearance-none"
-                     placeholder="{% trans 'Search for a TV show...' %}"
+                     placeholder="{% trans 'Click to list shows, or type to search' %}"
                      name="q"
                      type="text"
                      autocomplete="off"
                      hx-get="{% url 'search_parent_tv' %}"
-                     hx-trigger="keyup changed delay:300ms"
+                     hx-trigger="focus[!this.value], keyup changed delay:300ms"
                      hx-target="#parent-tv-results">
               <!-- Hidden input to store the selected TV ID -->
               <input id="parent-tv-id" name="parent_tv" type="hidden">
@@ -193,12 +193,12 @@
             <div class="relative">
               <input id="parent-season-input"
                      class="w-full p-2 pl-9 bg-[#39404b] rounded-md text-white border border-gray-600 focus:outline-none focus:ring-2 focus:ring-[#4a9eff] appearance-none"
-                     placeholder="{% trans 'Search for a season...' %}"
+                     placeholder="{% trans 'Click to list seasons, or type a show or season number' %}"
                      name="q"
                      type="text"
                      autocomplete="off"
                      hx-get="{% url 'search_parent_season' %}"
-                     hx-trigger="keyup changed delay:300ms"
+                     hx-trigger="focus[!this.value], keyup changed delay:300ms"
                      hx-target="#parent-season-results">
               <!-- Hidden input to store the selected Season ID -->
               <input id="parent-season-id" name="parent_season" type="hidden">

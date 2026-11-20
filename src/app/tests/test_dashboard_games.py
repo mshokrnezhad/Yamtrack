@@ -64,11 +64,12 @@ class DashboardChooserTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTemplateUsed(response, "app/dashboard_home.html")
-        self.assertContains(response, f'href="{reverse("dashboard_movies_tv")}"')
+        self.assertContains(response, f'href="{reverse("dashboard_movies")}"')
+        self.assertContains(response, f'href="{reverse("dashboard_series")}"')
         self.assertContains(response, f'href="{reverse("dashboard_games")}"')
         self.assertContains(response, f'href="{reverse("dashboard_books")}"')
-        self.assertContains(response, "Movies &amp; TV")
-        self.assertNotContains(response, "Movies & TV")
+        self.assertContains(response, "Movies")
+        self.assertContains(response, "Series")
         self.assertContains(response, "Games")
         self.assertContains(response, "Books")
 
@@ -76,6 +77,10 @@ class DashboardChooserTests(TestCase):
 
         self.assertEqual(root.status_code, 302)
         self.assertEqual(root.url, "/dashboard")
+        self.assertRedirects(
+            self.client.get("/dashboard/movies-tv"),
+            reverse("dashboard"),
+        )
 
     def test_sidebar_lists_rows_per_category(self):
         """The sidebar groups every dashboard row under its category."""
@@ -109,21 +114,31 @@ class DashboardChooserTests(TestCase):
             f'href="{reverse("dashboard_row", args=[f"book-tag-{shelf.id}"])}"',
         )
         self.assertNotContains(response, "/chooser/anime")
+        self.assertNotContains(response, "<span>Dashboard</span>")
+        self.assertContains(response, f'href="{reverse("dashboard")}"')
+        self.assertContains(response, "<span>Home</span>")
 
-    def test_movie_and_game_pages_do_not_share_rows(self):
+        user.game_enabled = False
+        user.save()
+        titles = [str(section["title"]) for section in dashboard.sidebar_sections(user)]
+        self.assertEqual(titles, ["Movies", "Series", "Books"])
+
+    def test_movie_series_and_game_pages_do_not_share_rows(self):
         """Each dashboard renders only its own rows."""
-        movies = self.client.get(reverse("dashboard_movies_tv"))
+        movies = self.client.get(reverse("dashboard_movies"))
+        series = self.client.get(reverse("dashboard_series"))
         games = self.client.get(reverse("dashboard_games"))
         # The sidebar names every row on every page, so compare the rows.
         movie_titles = [str(row["title"]) for row in movies.context["rows"]]
+        series_titles = [str(row["title"]) for row in series.context["rows"]]
         game_titles = [str(row["title"]) for row in games.context["rows"]]
 
-        self.assertIn("Continue watching", movie_titles)
-        self.assertIn("New episodes", movie_titles)
-        self.assertContains(movies, "Refresh")
-        self.assertContains(movies, "Movies &amp; TV")
-        self.assertNotIn("Continue Playing - Xbox", movie_titles)
-        self.assertNotIn("Best Owned - Switch", movie_titles)
+        self.assertEqual(movie_titles, [])
+        self.assertEqual(series_titles, ["Continue watching", "New episodes"])
+        self.assertContains(series, "Refresh")
+        self.assertNotContains(movies, "Refresh")
+        self.assertEqual(movies.context["page_title"], "Movies")
+        self.assertEqual(series.context["page_title"], "Series")
         self.assertEqual(game_titles, list(GAME_TITLES))
         self.assertNotContains(games, "Refresh")
         self.assertContains(games, "No games in progress.")
@@ -134,7 +149,8 @@ class DashboardChooserTests(TestCase):
         for key in MOVIE_ROW_KEYS:
             page = self.client.get(reverse("dashboard_row", args=[key]))
             self.assertEqual(page.status_code, 200)
-            self.assertContains(page, f'href="{reverse("dashboard_movies_tv")}"')
+            expected = "dashboard_movies" if "movies" in key else "dashboard_series"
+            self.assertEqual(page.context["back_url"], reverse(expected))
         for key in (
             "continue-playing-xbox",
             "continue-playing-switch",
